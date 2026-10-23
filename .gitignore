@@ -1,0 +1,12 @@
+# Artefacts de compilation
+dist/
+iso/
+iso_root/
+*.o
+*.bin
+*.img.tmp
+__pycache__/
+
+# Locaux
+*.log
+q*.sock
