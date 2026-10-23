@@ -1,4 +1,4 @@
-# Arfuso OS — v1.3.0
+# Arfuso OS — v1.3.1
 
 Système d'exploitation indépendant écrit **100 % from scratch** (aucune base
 Linux, Windows ou autre) : chargeur de démarrage (bootloader), noyau 64 bits,
@@ -9,7 +9,7 @@ maison, en assembleur (NASM) et en C.
 
 | Fichier | Cible |
 |---|---|
-| `arfuso-1.3.0-x86_64.iso` | PC x86_64 (BIOS), ISO amorçable = assistant d'installation (**dernière version**) |
+| `arfuso-1.3.1-x86_64.iso` | PC x86_64 (BIOS), ISO amorçable = assistant d'installation (**dernière version**) |
 | `arfuso-1.0.0 / 1.1.0 / 1.2.0 …` | versions précédentes conservées |
 | `arfuso-1.x.0-arm64-kernel8.img` | ARM64 (noyau de démarrage minimal, sortie série) |
 
@@ -17,6 +17,38 @@ L'ISO installe Arfuso OS sur le disque dur. Au premier démarrage, un petit
 assistant crée votre profil (identifiant + mot de passe optionnel), puis
 l'appareil redémarre tout seul : écran de démarrage image, écran de
 verrouillage image, écran de connexion, bureau.
+
+## Nouveautés v1.3.1 — Paramètres complets
+
+L'application **Paramètres** couvre maintenant 9 sections, dans le style des
+grandes plateformes :
+
+1. **Système** — affichage (échelle 100 %/125 %), etendue d'ecran simulee,
+   modes d'alimentation (économie / équilibré / performance), minuteur de
+   mise en veille, stockage visuel (barre d'occupation AFS).
+2. **Réseau** — état IP passerelle/DNS réels de la pile maison, relance DHCP,
+   **mode avion** (coupe réellement le navigateur et le Store), Bluetooth.
+3. **Personnalisation** — thème sombre/clair (enregistré), **couleur
+   d'accentuation appliquée à toute l'interface** (6 couleurs), fond
+   d'écran : couleur unie ou **image BMP du dossier Images** (+ import
+   depuis CD/USB), taille des textes.
+4. **Applications** — liste réelle du dossier Applications avec tailles,
+   **désinstallation des apps .arf tierces**, associations par défaut.
+5. **Comptes** — comptes utilisateurs réels (création id/mot de passe),
+   option d'exigence du mot de passe au démarrage.
+6. **Sécurité** — pare-feu (état réel de la pile TCP), permissions
+   caméra/micro/localisation/fichiers, chiffrement disque, télémétrie.
+7. **Accessibilité** — contraste élevé, état des aides (loupe, filtres,
+   clavier visuel…).
+8. **Mise à jour & récupération** — historique des versions, **bouton
+   Réinitialiser** (relance l'assistant de premier démarrage, profil effacé),
+   redémarrer / éteindre / verrouiller.
+9. **À propos** — CPU réel (CPUID), **RAM réelle** (registres CMOS BIOS),
+   framebuffer, occupation disque, version/build/architecture.
+
+Tout ce que le noyau peut réellement faire est branché pour de vrai ; le
+reste est clairement étiqueté « non disponible en v1.3 ». Réglages
+persistants (secteur de configuration sur disque).
 
 ## Nouveautés v1.3
 

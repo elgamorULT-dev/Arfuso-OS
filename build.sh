@@ -1,7 +1,7 @@
 #!/bin/bash
 # ============================================================
 # Arfuso OS v1.3.0 - Script de construction complet
-# Produit : dist/arfuso-1.3.0-x86_64.iso (bootable BIOS / Vectras VM)
+# Produit : dist/arfuso-1.3.1-x86_64.iso (bootable BIOS / Vectras VM)
 # ============================================================
 set -e
 cd "$(dirname "$0")"
@@ -83,7 +83,7 @@ EOF
 
 echo "[6/7] Création de l'ISO El Torito..."
 xorriso -as mkisofs -quiet \
-    -o dist/arfuso-1.3.0-x86_64.iso \
+    -o dist/arfuso-1.3.1-x86_64.iso \
     -V "ARFUSO_1_3_0" -J -R \
     -b arfubo.bin \
     -no-emul-boot \
@@ -94,4 +94,4 @@ xorriso -as mkisofs -quiet \
 echo "[7/7] Terminé !"
 ls -la dist/
 echo ""
-echo "===> dist/arfuso-1.3.0-x86_64.iso"
+echo "===> dist/arfuso-1.3.1-x86_64.iso"

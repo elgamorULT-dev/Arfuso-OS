@@ -16,3 +16,7 @@ extern int g_lang;       /* 0 = Français, 1 = English            */
 extern int g_kbd;        /* 0 = AZERTY (FR), 1 = QWERTY (EN)     */
 extern int g_tz;         /* index du fuseau dans l'installateur  */
 extern int g_platform;   /* 0 = Ordinateur, 1 = Appareil mobile  */
+
+/* Réglages persistés par l'OS installé (secteur config, octets 16+) */
+int  installer_cfg_get(AtaDisk *d, int off, u8 *val);
+void installer_cfg_set(AtaDisk *d, int off, u8 val);

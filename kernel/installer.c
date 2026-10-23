@@ -533,3 +533,24 @@ void installer_set_booted(AtaDisk *d) {
     ata_write_sector(d, CFG_LBA, buf);
     ata_flush(d);
 }
+
+/* ================================================================== */
+/* Réglages utilisateur persistés (Paramètres v1.3.1) — octets 16..30  */
+/* ================================================================== */
+int installer_cfg_get(AtaDisk *d, int off, u8 *val) {
+    u8 buf[512];
+    if (off < 10 || off > 200) return 0;
+    if (!ata_read_sector(d, CFG_LBA, buf)) return 0;
+    if (buf[0] != 'A' || buf[1] != 'R' || buf[2] != 'C' || buf[3] != '1') return 0;
+    *val = buf[off];
+    return 1;
+}
+void installer_cfg_set(AtaDisk *d, int off, u8 val) {
+    u8 buf[512];
+    if (off < 10 || off > 200) return;
+    if (!ata_read_sector(d, CFG_LBA, buf)) return;
+    if (buf[0] != 'A' || buf[1] != 'R' || buf[2] != 'C' || buf[3] != '1') return;
+    buf[off] = val;
+    ata_write_sector(d, CFG_LBA, buf);
+    ata_flush(d);
+}

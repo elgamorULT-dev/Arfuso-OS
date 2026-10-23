@@ -117,3 +117,9 @@ void s_copy(char *d, const char *s, int max);
 void s_append(char *d, const char *s, int max);
 int  s_len(const char *s);
 void s_ndec(u32 v, char *out);
+
+/* Réglages système (Paramètres v1.3.1), chargés au boot depuis le secteur config */
+extern u32 g_accent;
+extern int g_theme, g_pwrmode, g_veille, g_scale100, g_fontbig;
+extern int g_telemetry, g_login_pwd, g_hicontrast, g_airplane;
+void settings_load(AtaDisk *d);

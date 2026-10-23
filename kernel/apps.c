@@ -922,6 +922,7 @@ static void brow_render(void) {
 
 static void brow_load(const char *url) {
     ADREDIT = 0;
+    if (g_airplane) { s_copy(STATUS, "Mode avion activé : désactivez-le dans Paramètres > Réseau.", 140); NLINES = 0; return; }
     if (!net_available()) {
         s_copy(STATUS, "Aucune carte réseau (e1000) : activez-la dans Vectras (carte e1000 NAT).", 140);
         NLINES = 0; return;
@@ -1320,7 +1321,7 @@ typedef struct { const char *nom; const char *desc; const char *glyph; u32 color
                  const char *script; } CatEnt;
 
 static const char SC_INFO[] =
-    "TITRE|Infos Arfuso 1.3\n"
+    "TITRE|Infos Arfuso 1.3.1\n"
     "TXT|Noyau 100% maison, écrit en C et assembleur.\n"
     "TXT|Fonctions : navigateur web, exploreur, boutique, jeux.\n";
 static const char SC_ASTUCE[] =
@@ -1417,7 +1418,7 @@ int app_store(void) {
             s_copy(SMSG, "Téléchargement...", 110);
             static u8 dl[8192];
             HttpResult r;
-            int m = net_available() ? http_get(SDLURL, dl, 8000, &r) : -4;
+            int m = g_airplane ? -9 : (net_available() ? http_get(SDLURL, dl, 8000, &r) : -4);
             if (m == 0 && r.len > 80 && dl[0]=='A' && dl[5]=='P') {
                 /* nom depuis l'en-tête */
                 ArfHead *h = (ArfHead *)dl;
@@ -1426,7 +1427,8 @@ int app_store(void) {
                 afs_write_file((u32)FOLD_Apps, fname, dl, r.len);
                 s_copy(SMSG, "Application téléchargée et installée !", 110);
             } else {
-                s_copy(SMSG, "Échec : ", 110);
+                if (m == -9) { s_copy(SMSG, "Mode avion activé (Paramètres > Réseau).", 110); continue; }
+            s_copy(SMSG, "Échec : ", 110);
                 s_append(SMSG, m == 0 ? "ce fichier n'est pas une app .arf" : net_strerror(m), 110);
             }
             continue;
@@ -1447,14 +1449,90 @@ int app_store(void) {
 /* =====================================================================
  * Paramètres v2 : onglets
  * ===================================================================== */
+/* ---------- Réglages système persistants (secteur config LBA 950) ---------- */
+u32 g_accent = 0x1A73E8;
+int g_theme = 0;        /* 16: 0 sombre, 1 clair */
+int g_pwrmode = 0;      /* 18: 0 équilibré, 1 économie, 2 performances */
+int g_veille = 0;       /* 19: 0 = 5 min, 1 = 1 min, 2 = 15 min, 3 = jamais */
+int g_scale100 = 0;     /* 20: 0 = 100 %, 1 = 125 % */
+int g_fontbig = 0;      /* 21: 0 normal, 1 grand */
+int g_telemetry = 0;    /* 22: 0 jamais, 1 auto */
+int g_login_pwd = 0;    /* 23: 0 mdp exigé si le compte en a un, 1 connexion sans mdp */
+int g_hicontrast = 0;   /* 24: 0 non, 1 oui */
+int g_airplane = 0;     /* RAM : mode avion (coupe le navigateur et le Store) */
+static const u32 ACCENTS[6] = {0x1A73E8, 0x2E7D32, 0xC62828, 0x7B1FA2, 0xEF6C00, 0x00838F};
+static const int VEILLE_MIN[4] = {5, 1, 15, 0};
+
+static int RCONF = 0;
+static int UI_ROW[16] = {0};
+
+static void machine_reset(void) {
+    CURSOR_ON = 0;
+    rect_fill(0, 0, FB_W, FB_H, COL_BLACK);
+    text_center(&FONT_BTN, FB_W / 2, FB_H / 2 - 10, "Redémarrage en cours...", COL_WHITE);
+    fb_flush();
+    delay(60000000);
+    outb(0x64, 0xFE);
+    delay(5000000);
+    cpu_off();
+}
+
+/* marque du processeur via CPUID (identification réelle du matériel) */
+static void cpuid_brand(char out[49]) {
+    u32 a, b, c, dd; u32 *p = (u32 *)out;
+    __asm__ volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(dd) : "a"(0x80000002u));
+    p[0]=a; p[1]=b; p[2]=c; p[3]=dd;
+    __asm__ volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(dd) : "a"(0x80000003u));
+    p[4]=a; p[5]=b; p[6]=c; p[7]=dd;
+    __asm__ volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(dd) : "a"(0x80000004u));
+    p[8]=a; p[9]=b; p[10]=c; p[11]=dd;
+    out[48] = 0;
+}
+
+/* taille de la RAM lue dans la CMOS du BIOS
+   (0x34/0x35 : Mo au-delà de 16 Mo, en unités de 64 Ko ; sinon 0x30/0x31 en Ko) */
+static u32 cmos_ram_mb(void) {
+    outb(0x70, 0x34); u64 u = inb(0x71);
+    outb(0x70, 0x35); u |= (u64)inb(0x71) << 8;
+    if (u) return (u32)(16 + u / 16);
+    outb(0x70, 0x30); u32 lo = inb(0x71);
+    outb(0x70, 0x31); u32 hi = inb(0x71);
+    return 1 + (((hi << 8) | lo) >> 10);
+}
+
+void settings_load(AtaDisk *d) {
+    u8 v;
+    if (installer_cfg_get(d, 16, &v)) g_theme    = v & 1;
+    if (installer_cfg_get(d, 17, &v)) g_accent   = ACCENTS[v % 6];
+    if (installer_cfg_get(d, 18, &v)) g_pwrmode  = v % 3;
+    if (installer_cfg_get(d, 19, &v)) g_veille   = v & 3;
+    if (installer_cfg_get(d, 20, &v)) g_scale100 = v & 1;
+    if (installer_cfg_get(d, 21, &v)) g_fontbig  = v & 1;
+    if (installer_cfg_get(d, 22, &v)) g_telemetry= v & 1;
+    if (installer_cfg_get(d, 23, &v)) g_login_pwd= v & 1;
+    if (installer_cfg_get(d, 24, &v)) g_hicontrast = v & 1;
+}
+static void cfg_sav(int off, int val) { installer_cfg_set(&the_disk, off, (u8)val); }
+
+/* petits widgets pour les pages de réglages */
+static void pill(int x, int y, int w, int on) {
+    rr_fill(x, y, w, 30, 15, on ? g_accent : 0x9E9E9E);
+    rr_fill(x + (on ? w - 28 : 4), y + 3, 24, 24, 12, COL_WHITE);
+}
+static void chip(int x, int y, int w, const char *t, int on) {
+    rr_fill(x, y, w, 28, 6, on ? g_accent : 0xF1F3F4);
+    text_center(&FONT_SM, x + w / 2, y + 6, t, on ? COL_WHITE : COL_DARKTXT);
+}
+
 static int PTAB = 0;
-static const char *PTABS[7] = {
-    "Fond d'écran", "Bluetooth", "Wi-Fi", "Ethernet", "Écrans", "Comptes", "Système"
+static const char *PTABS[9] = {
+    "Système", "Réseau", "Personnalisation", "Applications", "Comptes",
+    "Sécurité", "Accessibilité", "Mise à jour", "À propos"
 };
-static char NEWU[24] = "", NEWP[24] = "";
-static int  UEDIT = 0;   /* 1 = nom, 2 = mot de passe */
-static int  WALL_L[12];  /* zones bmp */
 static char PMSG[90] = "";
+static int WALL_L[12] = {0};
+static int UEDIT = 0;
+static char NEWU[26] = "", NEWP[26] = "";
 
 int app_params(void) {
     PMSG[0] = 0;
@@ -1463,178 +1541,417 @@ int app_params(void) {
         draw_desktop_base(&d);
         zones_clear();
         int cx, cy, wx, wy;
-        ui_window_at("Paramètres", 840, 520, &cx, &cy, &wx, &wy);
+        ui_window_at("Paramètres Arfuso", 880, 560, &cx, &cy, &wx, &wy);
         /* onglets à gauche */
-        for (int i = 0; i < 7; i++) {
-            int yy = wy + 44 + i * 52;
-            if (i == PTAB) rr_fill(wx + 6, yy, 200, 44, 6, 0x1565C0);
-            else rr_fill(wx + 6, yy, 200, 44, 6, 0xF0F0F0);
-            text(&FONT_UI, wx + 18, yy + 12, PTABS[i], i == PTAB ? COL_WHITE : COL_DARKTXT);
-            zone_add(wx + 6, yy, 200, 44, 200 + i);
+        for (int i = 0; i < 9; i++) {
+            int yy = wy + 42 + i * 46;
+            if (i == PTAB) rr_fill(wx + 6, yy, 208, 40, 6, g_hicontrast ? COL_BLACK : g_accent);
+            else rr_fill(wx + 6, yy, 208, 40, 6, g_hicontrast ? 0xDDDDDD : 0xF0F0F0);
+            text(&FONT_UI, wx + 16, yy + 10, PTABS[i], i == PTAB ? COL_WHITE : COL_DARKTXT);
+            zone_add(wx + 6, yy, 208, 40, 200 + i);
         }
-        int px_ = wx + 220, py_ = wy + 52;
-        /* --- contenu --- */
-        if (PTAB == 0) { /* fond d'écran */
-            text(&FONT_UI, px_, py_, "Choisir un fond du bureau :", COL_DARKTXT);
-            py_ += 40;
+        int px_ = wx + 228, py_ = wy + 46;
+        u32 LBL = g_hicontrast ? COL_BLACK : COL_DARKTXT;
+        u32 SUB = g_hicontrast ? 0x212121 : 0x757575;
+
+        /* ================= 1. Système & Matériel ================= */
+        if (PTAB == 0) {
+            text(&FONT_UI, px_, py_, "Affichage", LBL); py_ += 24;
+            char ln[80];
+            s_copy(ln, "Résolution : ", 80);
+            char nb[10];
+            u32_str(FB_W, nb); s_append(ln, nb, 80);
+            s_append(ln, " x ", 80); u32_str(FB_H, nb); s_append(ln, nb, 80);
+            s_append(ln, "  (60 Hz, fixe sur cette machine)", 80);
+            text(&FONT_SM, px_, py_, ln, SUB); py_ += 24;
+            text(&FONT_SM, px_, py_, "Mise à l'échelle :", SUB);
+            chip(px_ + 130, py_ - 4, 90, "100 %", g_scale100 == 0);
+            zone_add(px_ + 130, py_ - 4, 90, 28, 300);
+            chip(px_ + 228, py_ - 4, 90, "125 %", g_scale100 == 1);
+            zone_add(px_ + 228, py_ - 4, 90, 28, 301);
+            py_ += 30;
+            text(&FONT_SM, px_, py_, "Multi-écran :", SUB);
+            chip(px_ + 130, py_ - 4, 120, "Dupliquer", disp_extend == 0);
+            zone_add(px_ + 130, py_ - 4, 120, 28, 302);
+            chip(px_ + 258, py_ - 4, 120, "Étendre", disp_extend == 1);
+            zone_add(px_ + 258, py_ - 4, 120, 28, 303);
+            text(&FONT_SM, px_ + 396, py_, "(2e écran non détecté)", SUB);
+            py_ += 34;
+            text(&FONT_SM, px_, py_, "HDR / profils colorimétriques : non géré (sortie VESA).", SUB);
+            py_ += 30;
+
+            text(&FONT_UI, px_, py_, "Son", LBL); py_ += 24;
+            text(&FONT_SM, px_, py_, "Aucun périphérique audio détecté (pilote AC97/HDA non porté).", SUB);
+            py_ += 30;
+
+            text(&FONT_UI, px_, py_, "Alimentation", LBL); py_ += 24;
+            text(&FONT_SM, px_, py_, "Mode :", SUB);
+            chip(px_ + 130, py_ - 4, 110, "Équilibré", g_pwrmode == 0);
+            zone_add(px_ + 130, py_ - 4, 110, 28, 304);
+            chip(px_ + 248, py_ - 4, 118, "Éco d'énergie", g_pwrmode == 1);
+            zone_add(px_ + 248, py_ - 4, 118, 28, 305);
+            chip(px_ + 374, py_ - 4, 120, "Performances", g_pwrmode == 2);
+            zone_add(px_ + 374, py_ - 4, 120, 28, 306);
+            py_ += 32;
+            text(&FONT_SM, px_, py_, "Éteindre l'écran après :", SUB);
+            const char *VN[4] = {"5 min", "1 min", "15 min", "jamais"};
             for (int i = 0; i < 4; i++) {
-                int xx = px_ + i * 96;
-                rr_fill(xx, py_, 84, 60, 5, bg_colors[i]);
-                if (bg_mode == i) rect_fill(xx - 2, py_ - 2, 88, 64, 0x1565C0);
-                zone_add(xx - 2, py_ - 2, 88, 64, 230 + i);
+                chip(px_ + 230 + i * 82, py_ - 4, 76, VN[i], g_veille == i);
+                zone_add(px_ + 230 + i * 82, py_ - 4, 76, 28, 307 + i);
             }
-            py_ += 76;
-            text(&FONT_UI, px_, py_, "Images du disque (Dossier Images) :", COL_DARKTXT);
-            py_ += 26;
+            py_ += 34;
+            text(&FONT_SM, px_, py_, "Batterie : machine sur secteur (pas de gestion ACPI batterie v1.3).", SUB);
+            py_ += 30;
+
+            text(&FONT_UI, px_, py_, "Stockage (disque Arfuso)", LBL); py_ += 24;
+            int pct = afs_present() ? (int)afs_used_pct() : 0;
+            rr_fill(px_, py_, 560, 20, 8, 0xE0E0E0);
+            rr_fill(px_, py_, (560 * pct) / 100, 20, 8, g_accent);
+            char pc[40];
+            s_copy(pc, " ", 40); u32_str((u32)pct, nb); s_append(pc, nb, 40);
+            s_append(pc, " % occupé", 40);
+            text(&FONT_SM, px_ + 8, py_ + 2, pc, pct > 55 ? COL_WHITE : LBL);
+            py_ += 28;
+            rr_fill(px_, py_, 300, 30, 5, 0x212121);
+            text_center(&FONT_SM, px_ + 150, py_ + 7, "Nettoyer les fichiers temporaires", COL_WHITE);
+            zone_add(px_, py_, 300, 30, 311);
+            text(&FONT_SM, px_ + 312, py_ + 7, "Partitionnement : voir l'installateur.", SUB);
+            if (PMSG[0]) { py_ += 38; text(&FONT_SM, px_, py_, PMSG, g_accent); }
+        }
+
+        /* ================= 2. Réseau & Connectivité ================= */
+        if (PTAB == 1) {
+            text(&FONT_UI, px_, py_, "Ethernet (e1000)", LBL); py_ += 26;
+            if (!net_available()) text(&FONT_SM, px_, py_, "Non détectée : ajoutez la carte e1000 dans Vectras.", 0xC62828);
+            else {
+                char l2[90], m[90];
+                s_copy(l2, "Adresse IP : ", 90);
+                if (net_ready()) ip_to_str(NET_IP, l2 + 13); else s_append(l2, "DHCP en cours...", 90);
+                text(&FONT_UI, px_, py_, l2, LBL); py_ += 24;
+                s_copy(m, "Passerelle : ", 90); ip_to_str(NET_GW, m + 13);
+                text(&FONT_SM, px_, py_, m, SUB); py_ += 20;
+                s_copy(m, "DNS        : ", 90); ip_to_str(NET_DNS, m + 13);
+                text(&FONT_SM, px_, py_, m, SUB); py_ += 26;
+                rr_fill(px_, py_, 220, 30, 5, g_accent);
+                text_center(&FONT_SM, px_ + 110, py_ + 7, "Renouveler le DHCP", COL_WHITE);
+                zone_add(px_, py_, 220, 30, 320);
+                text(&FONT_SM, px_ + 240, py_ + 7, "IP/DNS : automatiques (DHCP)", SUB);
+                py_ += 40;
+            }
+            text(&FONT_SM, px_, py_, "Mode avion", SUB);
+            pill(px_ + 130, py_ - 4, 58, g_airplane);
+            zone_add(px_ + 130, py_ - 4, 58, 30, 321);
+            text(&FONT_SM, px_ + 200, py_, g_airplane ? "Activé : navigateur et Store coupés." : "Désactivé.", SUB);
+            py_ += 42;
+
+            text(&FONT_UI, px_, py_, "Wi-Fi", LBL); py_ += 24;
+            text(&FONT_SM, px_, py_, "Aucune carte Wi-Fi détectée (Vectras n'émule pas de Wi-Fi).", SUB);
+            py_ += 20; text(&FONT_SM, px_, py_, "Internet passe par l'Ethernet ci-dessus.", SUB);
+            py_ += 42;
+            text(&FONT_UI, px_, py_, "Bluetooth & périphériques", LBL); py_ += 24;
+            text(&FONT_SM, px_, py_, "Bluetooth", SUB);
+            pill(px_ + 130, py_ - 4, 58, bt_on);
+            zone_add(px_ + 130, py_ - 4, 58, 30, 322);
+            text(&FONT_SM, px_ + 200, py_, bt_on ? "Activé (aucun contrôleur détecté)." : "Désactivé.", SUB);
+            py_ += 40;
+            text(&FONT_UI, px_, py_, "Partage & VPN", LBL); py_ += 24;
+            text(&FONT_SM, px_, py_, "Client VPN (WireGuard/OpenVPN) : à venir.", SUB);
+            py_ += 20; text(&FONT_SM, px_, py_, "Point d'accès mobile : indisponible sans Wi-Fi.", SUB);
+            if (PMSG[0]) { py_ += 40; text(&FONT_SM, px_, py_, PMSG, g_accent); }
+        }
+
+        /* ================= 3. Personnalisation ================= */
+        if (PTAB == 2) {
+            text(&FONT_UI, px_, py_, "Thème", LBL); py_ += 24;
+            radio(px_ + 10, py_ + 8, g_theme == 0);
+            text(&FONT_SM, px_ + 38, py_ + 4, "Sombre", LBL);
+            zone_add(px_, py_, 110, 30, 340);
+            radio(px_ + 130, py_ + 8, g_theme == 1);
+            text(&FONT_SM, px_ + 158, py_ + 4, "Clair (v1.4)", LBL);
+            zone_add(px_ + 120, py_, 140, 30, 341);
+            py_ += 38;
+            text(&FONT_UI, px_, py_, "Couleur d'accentuation", LBL); py_ += 30;
+            const char *AN[6] = {"Bleu", "Vert", "Rouge", "Violet", "Orange", "Sarcelle"};
+            for (int i = 0; i < 6; i++) {
+                int xx = px_ + i * 90;
+                rr_fill(xx, py_, 80, 34, 7, ACCENTS[i]);
+                if (g_accent == ACCENTS[i]) rect_fill(xx - 2, py_ - 2, 84, 4, COL_BLACK), rect_fill(xx - 2, py_ + 32, 84, 4, COL_BLACK);
+                zone_add(xx - 2, py_ - 2, 84, 38, 350 + i);
+            }
+            py_ += 46;
+            text(&FONT_UI, px_, py_, "Taille des textes", LBL); py_ += 24;
+            radio(px_ + 10, py_ + 8, g_fontbig == 0);
+            text(&FONT_SM, px_ + 38, py_ + 4, "Normale", LBL);
+            zone_add(px_, py_, 120, 30, 360);
+            radio(px_ + 140, py_ + 8, g_fontbig == 1);
+            text(&FONT_SM, px_ + 168, py_ + 4, "Grande (v1.4)", LBL);
+            zone_add(px_ + 130, py_, 150, 30, 361);
+            py_ += 40;
+
+            text(&FONT_UI, px_, py_, "Fond d'écran & écran de verrouillage", LBL); py_ += 24;
+            for (int i = 0; i < 4; i++) {
+                int xx = px_ + i * 92;
+                rr_fill(xx, py_, 82, 52, 5, bg_colors[i]);
+                if (bg_mode == i) rect_fill(xx - 2, py_ - 2, 86, 4, g_accent), rect_fill(xx - 2, py_ + 50, 86, 4, g_accent);
+                zone_add(xx - 2, py_ - 2, 86, 56, 370 + i);
+            }
+            text(&FONT_SM, px_ + 380, py_ + 16, "Couleurs unies", SUB);
+            py_ += 64;
+            text(&FONT_SM, px_, py_, "Image personnalisée (Dossier Images, .BMP) :", SUB); py_ += 22;
             static AfsItem IM[12];
-            int nb = afs_list((u32)FOLD_Images, IM, 12);
-            int shown = 0;
-            for (int i = 0; i < nb && shown < 12; i++) {
+            int nb = afs_list((u32)FOLD_Images, IM, 12), shown = 0;
+            for (int i = 0; i < nb && shown < 3; i++) {
                 if (IM[i].type != 1) continue;
-                /* n'a afficher que les .BMP */
                 int l = s_len(IM[i].name);
                 if (l < 4) continue;
                 char e1 = IM[i].name[l-1], e2 = IM[i].name[l-2];
                 if (!((e1=='P'||e1=='p') && (e2=='M'||e2=='m'))) continue;
                 if (bg_mode == 4 && s_eq(wallpaper_file, IM[i].name))
-                    rr_fill(px_, py_, 560, 30, 4, 0xBBDEFB);
-                else
-                    rr_fill(px_, py_, 560, 30, 4, 0xF5F5F5);
-                text(&FONT_UI, px_ + 10, py_ + 5, IM[i].name, COL_DARKTXT);
-                zone_add(px_, py_, 560, 30, 240 + shown);
+                    rr_fill(px_, py_, 560, 26, 4, 0xBBDEFB);
+                else rr_fill(px_, py_, 560, 26, 4, 0xF5F5F5);
+                text(&FONT_SM, px_ + 8, py_ + 6, IM[i].name, LBL);
+                zone_add(px_, py_, 560, 26, 380 + shown);
                 WALL_L[shown] = i;
-                py_ += 34;
-                shown++;
+                py_ += 30; shown++;
             }
-            if (!shown) text(&FONT_SM, px_, py_, "(Aucune image BMP. Copiez-en via l'Explorateur ou insérez le CD.)", 0x757575);
-            py_ += 44;
-            rr_fill(px_, py_, 300, 34, 5, 0x00838F);
-            text_center(&FONT_UI, px_ + 150, py_ + 8, "Importer depuis CD/USB...", COL_WHITE);
-            zone_add(px_, py_, 300, 34, 255);
+            if (!shown) { text(&FONT_SM, px_, py_, "(aucune image — bouton ci-dessous pour importer)", SUB); py_ += 30; }
+            rr_fill(px_, py_, 280, 30, 5, 0x00838F);
+            text_center(&FONT_SM, px_ + 140, py_ + 7, "Importer depuis CD/USB...", COL_WHITE);
+            zone_add(px_, py_, 280, 30, 389);
+            if (PMSG[0]) text(&FONT_SM, px_ + 292, py_ + 7, PMSG, g_accent);
         }
-        if (PTAB == 1) { /* bluetooth */
-            text(&FONT_UI, px_, py_, "Bluetooth", COL_DARKTXT);
-            py_ += 36;
-            rr_fill(px_, py_, 200, 40, 20, bt_on ? 0x2E7D32 : 0x9E9E9E);
-            text_center(&FONT_UI, px_ + 100, py_ + 11, bt_on ? "ACTIVÉ" : "DÉSACTIVÉ", COL_WHITE);
-            zone_add(px_, py_, 200, 40, 260);
-            py_ += 56;
-            if (bt_on) {
-                text(&FONT_UI, px_, py_, "Appareils détectés :", COL_DARKTXT);
-                text(&FONT_SM, px_, py_ + 26, "Aucun contrôleur Bluetooth sur cette machine.", 0x757575);
-                text(&FONT_SM, px_, py_ + 48, "(Sous Vectras VM, le Bluetooth n'est pas émulé.)", 0x757575);
-            } else {
-                text(&FONT_SM, px_, py_, "Le Bluetooth est désactivé.", 0x757575);
+
+        /* ================= 4. Applications ================= */
+        if (PTAB == 3) {
+            text(&FONT_UI, px_, py_, "Applications installées (Dossier Applications)", LBL); py_ += 26;
+            static AfsItem AP[16];
+            int na = afs_list((u32)FOLD_Apps, AP, 16), rows = 0;
+            char nb[12];
+            for (int i = 0; i < na && rows < 6; i++) {
+                if (AP[i].type != 1) continue;
+                int l = s_len(AP[i].name);
+                if (l < 4 || (AP[i].name[l-1]!='f'&&AP[i].name[l-1]!='F')) continue;
+                int eng = arf_engine_of(AP[i].node);
+                rr_fill(px_, py_, 560, 30, 5, 0xF5F5F5);
+                text(&FONT_UI, px_ + 10, py_ + 6, AP[i].name, LBL);
+                char sz[36]; s_copy(sz, " ", 36); u32_str(AP[i].size, nb); s_append(sz, nb, 36);
+                s_append(sz, " o", 36);
+                text(&FONT_SM, px_ + 240, py_ + 9, sz, SUB);
+                if (eng == 200) {   /* appli script -> désinstallable */
+                    rr_fill(px_ + 440, py_ + 3, 110, 24, 5, 0xC62828);
+                    text_center(&FONT_SM, px_ + 495, py_ + 9, "Désinstaller", COL_WHITE);
+                    zone_add(px_ + 440, py_ + 3, 110, 24, 390 + rows);
+                } else {
+                    text(&FONT_SM, px_ + 420, py_ + 9, "système", SUB);
+                }
+                UI_ROW[rows] = i;
+                py_ += 34; rows++;
             }
-        }
-        if (PTAB == 2) { /* wifi */
-            text(&FONT_UI, px_, py_, "Wi-Fi", COL_DARKTXT);
-            text(&FONT_SM, px_, py_ + 28, "Aucune carte Wi-Fi détectée sur cette machine.", 0x757575);
-            text(&FONT_SM, px_, py_ + 50, "La connexion internet passe par l'Ethernet (e1000).", 0x757575);
-            text(&FONT_SM, px_, py_ + 72, "Vectras VM n'émule pas de Wi-Fi.", 0x757575);
-        }
-        if (PTAB == 3) { /* ethernet */
-            text(&FONT_UI, px_, py_, "Ethernet (e1000)", COL_DARKTXT);
-            char l2[90];
-            if (!net_available()) text(&FONT_SM, px_, py_ + 28, "Non détectée : ajoutez la carte e1000 dans Vectras.", 0xC62828);
-            else {
-                s_copy(l2, "Adresse IP : ", 90);
-                if (net_ready()) ip_to_str(NET_IP, l2 + 13); else s_append(l2, "DHCP en cours...", 90);
-                text(&FONT_UI, px_, py_ + 30, l2, COL_DARKTXT);
-                char m[90];
-                s_copy(m, "Passerelle : ", 90); ip_to_str(NET_GW, m + 13);
-                text(&FONT_SM, px_, py_ + 58, m, 0x757575);
-                s_copy(m, "DNS        : ", 90); ip_to_str(NET_DNS, m + 13);
-                text(&FONT_SM, px_, py_ + 80, m, 0x757575);
-                rr_fill(px_, py_ + 110, 220, 34, 5, 0x1A73E8);
-                text_center(&FONT_UI, px_ + 110, py_ + 118, "Renouveler le DHCP", COL_WHITE);
-                zone_add(px_, py_ + 110, 220, 34, 262);
-            }
-        }
-        if (PTAB == 4) { /* écrans */
-            text(&FONT_UI, px_, py_, "Configuration des écrans :", COL_DARKTXT);
-            py_ += 36;
-            struct { const char *t; int v; int id; } D[2] = {
-                {"Dupliquer l'écran unique", 0, 270},
-                {"Étendre la zone de travail sur un 2e écran", 1, 271}};
-            for (int i = 0; i < 2; i++) {
-                radio(px_, py_, disp_extend == D[i].v);
-                text(&FONT_UI, px_ + 40, py_ - 1, D[i].t, COL_DARKTXT);
-                zone_add(px_, py_ - 4, 560, 34, D[i].id);
-                py_ += 44;
-            }
+            if (!rows) { text(&FONT_SM, px_, py_, "(aucune application trouvée)", SUB); py_ += 34; }
             py_ += 12;
-            text(&FONT_SM, px_, py_, "Second écran physique : non détecté.", 0x757575);
-            text(&FONT_SM, px_, py_ + 22, "Avec « étendre », tout est prêt dès qu'il sera branché.", 0x757575);
-        }
-        if (PTAB == 5) { /* comptes */
-            text(&FONT_UI, px_, py_, "Utilisateurs de cette machine :", COL_DARKTXT);
-            py_ += 34;
-            for (int i = 0; i < NUSERS; i++) {
-                rr_fill(px_, py_, 330, 34, 5, i == CUR_USER_IDX ? 0xE8F0FE : 0xF5F5F5);
-                text(&FONT_UI, px_ + 12, py_ + 7, USERS[i].name, COL_DARKTXT);
-                if (i == CUR_USER_IDX) text_right(&FONT_SM, px_ + 322, py_ + 11, "connecté", 0x1565C0);
-                py_ += 40;
-            }
-            py_ += 16;
-            text(&FONT_UI, px_, py_, "Créer un utilisateur :", COL_DARKTXT);
+            text(&FONT_UI, px_, py_, "Applications par défaut", LBL); py_ += 24;
+            text(&FONT_SM, px_, py_, ".arf → Visionneuse/Arfu Store    .txt → ArfuNotes    http:// → Chrome Arfuso", SUB);
             py_ += 30;
-            text(&FONT_SM, px_, py_, "Nom :", 0x757575);
-            rr_fill(px_ + 120, py_ - 4, 220, 30, 4, UEDIT == 1 ? 0xFFFFFF : 0xF1F3F4);
-            if (UEDIT == 1) rect_fill(px_ + 120, py_ - 4, 220, 2, 0x1565C0);
-            text(&FONT_UI, px_ + 128, py_ + 3, NEWU, COL_DARKTXT);
-            zone_add(px_ + 120, py_ - 4, 220, 30, 280);
-            py_ += 42;
-            text(&FONT_SM, px_, py_, "Mot de passe :", 0x757575);
-            rr_fill(px_ + 120, py_ - 4, 220, 30, 4, UEDIT == 2 ? 0xFFFFFF : 0xF1F3F4);
-            if (UEDIT == 2) rect_fill(px_ + 120, py_ - 4, 220, 2, 0x1565C0);
+            text(&FONT_UI, px_, py_, "Applications au démarrage", LBL); py_ += 24;
+            text(&FONT_SM, px_, py_, "Aucune application tierce ne démarre automatiquement au login.", SUB);
+            if (PMSG[0]) { py_ += 26; text(&FONT_SM, px_, py_, PMSG, g_accent); }
+        }
+
+        /* ================= 5. Comptes & Utilisateurs ================= */
+        if (PTAB == 4) {
+            text(&FONT_UI, px_, py_, "Utilisateurs de cette machine", LBL); py_ += 26;
+            int shown = 0;
+            for (int i = 0; i < NUSERS && shown < 3; i++, shown++) {
+                rr_fill(px_, py_, 330, 30, 5, i == CUR_USER_IDX ? 0xE8F0FE : 0xF5F5F5);
+                text(&FONT_UI, px_ + 12, py_ + 6, USERS[i].name, LBL);
+                if (i == CUR_USER_IDX) text_right(&FONT_SM, px_ + 322, py_ + 9, "connecté", g_accent);
+                py_ += 34;
+            }
+            if (NUSERS > 3) { text(&FONT_SM, px_, py_, "(…)", SUB); py_ += 26; }
+            py_ += 6;
+            text(&FONT_UI, px_, py_, "Créer un utilisateur", LBL); py_ += 26;
+            text(&FONT_SM, px_, py_, "Nom :", SUB);
+            rr_fill(px_ + 130, py_ - 4, 220, 28, 4, UEDIT == 1 ? 0xFFFFFF : 0xF1F3F4);
+            if (UEDIT == 1) rect_fill(px_ + 130, py_ - 4, 220, 2, g_accent);
+            text(&FONT_UI, px_ + 138, py_ + 2, NEWU, LBL);
+            zone_add(px_ + 130, py_ - 4, 220, 28, 400);
+            py_ += 36;
+            text(&FONT_SM, px_, py_, "Mot de passe :", SUB);
+            rr_fill(px_ + 130, py_ - 4, 220, 28, 4, UEDIT == 2 ? 0xFFFFFF : 0xF1F3F4);
+            if (UEDIT == 2) rect_fill(px_ + 130, py_ - 4, 220, 2, g_accent);
             char mask[26]; int l = s_len(NEWP);
             for (int i = 0; i < l; i++) mask[i] = '*';
             mask[l] = 0;
-            text(&FONT_UI, px_ + 128, py_ + 3, mask, COL_DARKTXT);
-            zone_add(px_ + 120, py_ - 4, 220, 30, 281);
+            text(&FONT_UI, px_ + 138, py_ + 2, mask, LBL);
+            zone_add(px_ + 130, py_ - 4, 220, 28, 401);
+            py_ += 36;
+            rr_fill(px_ + 130, py_, 170, 32, 5, 0x2E7D32);
+            text_center(&FONT_SM, px_ + 215, py_ + 8, "Ajouter", COL_WHITE);
+            zone_add(px_ + 130, py_, 170, 32, 402);
+            py_ += 46;
+            text(&FONT_UI, px_, py_, "Options de connexion", LBL); py_ += 26;
+            text(&FONT_SM, px_, py_, "Exiger le mot de passe à la connexion", SUB);
+            pill(px_ + 330, py_ - 4, 58, g_login_pwd == 0);
+            zone_add(px_ + 330, py_ - 4, 58, 30, 403);
+            text(&FONT_SM, px_ + 400, py_, g_login_pwd ? "Non (connexion sans mot de passe)" : "Oui (si le compte en a un)", SUB);
+            py_ += 40;
+            text(&FONT_SM, px_, py_, "PIN / biométrie / clé de sécurité : aucun capteur sur cette machine.", SUB);
+            py_ += 20; text(&FONT_SM, px_, py_, "Synchronisation cloud : non disponible en v1.3.", SUB);
+        }
+
+        /* ================= 6. Confidentialité & Sécurité ================= */
+        if (PTAB == 5) {
+            text(&FONT_UI, px_, py_, "Pare-feu & réseau", LBL); py_ += 24;
+            text(&FONT_SM, px_, py_, "Pare-feu intégré : actif.", 0x188837); py_ += 20;
+            text(&FONT_SM, px_, py_, "Aucun port en écoute : la pile TCP n'accepte que les réponses sortantes.", SUB);
+            py_ += 28;
+            text(&FONT_UI, px_, py_, "Autorisations des applications", LBL); py_ += 24;
+            text(&FONT_SM, px_, py_, "Caméra : aucun périphérique détecté.", SUB); py_ += 20;
+            text(&FONT_SM, px_, py_, "Microphone : aucun périphérique détecté.", SUB); py_ += 20;
+            text(&FONT_SM, px_, py_, "Localisation : non disponible (pas de source GPS/IP).", SUB); py_ += 20;
+            text(&FONT_SM, px_, py_, "Fichiers : ouverte aux applications intégrées (explorateur, notes…).", SUB);
+            py_ += 32;
+            text(&FONT_UI, px_, py_, "Chiffrement du disque", LBL); py_ += 24;
+            text(&FONT_SM, px_, py_, "Chiffrement du volume AFS : non disponible en v1.3.", SUB);
             py_ += 44;
-            rr_fill(px_ + 120, py_, 180, 34, 5, 0x2E7D32);
-            text_center(&FONT_UI, px_ + 210, py_ + 8, "Ajouter", COL_WHITE);
-            zone_add(px_ + 120, py_, 180, 34, 282);
+            text(&FONT_UI, px_, py_, "Diagnostic & données", LBL); py_ += 24;
+            text(&FONT_SM, px_, py_, "Envoi des rapports d'erreur (télémétrie)", SUB);
+            pill(px_ + 390, py_ - 4, 58, g_telemetry);
+            zone_add(px_ + 390, py_ - 4, 58, 30, 420);
+            text(&FONT_SM, px_ + 460, py_, g_telemetry ? "Automatique" : "Jamais", SUB);
+            py_ += 42;
+            text(&FONT_SM, px_, py_, "Analyse de sécurité : aucun logiciel malveillant connu détecté.", SUB);
+            if (PMSG[0]) { py_ += 26; text(&FONT_SM, px_, py_, PMSG, g_accent); }
         }
-        if (PTAB == 6) { /* système */
-            text(&FONT_UI, px_, py_, (char *)ED_NAMES[edition], COL_DARKTXT);
-            text(&FONT_SM, px_, py_ + 28, "Version 1.3.0 - noyau 100% maison Arfuso", 0x757575);
-            char u_[60];
-            s_copy(u_, "Disque Arfuso occupé à ", 60);
-            char nb[8]; u32_str(afs_used_pct(), nb);
-            s_append(u_, nb, 60); s_append(u_, " %", 60);
-            text(&FONT_SM, px_, py_ + 50, u_, 0x757575);
-            rr_fill(px_, py_ + 90, 180, 36, 5, 0xC62828);
-            text_center(&FONT_UI, px_ + 90, py_ + 99, "Éteindre", COL_WHITE);
-            zone_add(px_, py_ + 90, 180, 36, 290);
-            rr_fill(px_ + 200, py_ + 90, 180, 36, 5, 0x455A64);
-            text_center(&FONT_UI, px_ + 290, py_ + 99, "Verrouiller", COL_WHITE);
-            zone_add(px_ + 200, py_ + 90, 180, 36, 291);
-            if (PMSG[0]) text(&FONT_SM, px_, py_ + 140, PMSG, 0x1565C0);
+
+        /* ================= 7. Accessibilité ================= */
+        if (PTAB == 6) {
+            text(&FONT_UI, px_, py_, "Vision", LBL); py_ += 26;
+            text(&FONT_SM, px_, py_, "Contraste élevé dans Paramètres", SUB);
+            pill(px_ + 330, py_ - 4, 58, g_hicontrast);
+            zone_add(px_ + 330, py_ - 4, 58, 30, 440);
+            py_ += 44;
+            text(&FONT_SM, px_, py_, "Filtres de couleur (daltonisme) globaux : v1.4.", SUB); py_ += 20;
+            text(&FONT_SM, px_, py_, "Loupe logicielle / lecteur d'écran : v1.4.", SUB); py_ += 20;
+            text(&FONT_SM, px_, py_, "Taille des textes : Personnalisation > Taille des textes.", SUB);
+            py_ += 40;
+            text(&FONT_UI, px_, py_, "Audition", LBL); py_ += 26;
+            text(&FONT_SM, px_, py_, "Sortie son indisponible : sous-titres et audio mono sans objet.", SUB);
+            py_ += 46;
+            text(&FONT_UI, px_, py_, "Interaction", LBL); py_ += 26;
+            text(&FONT_SM, px_, py_, "Clavier visuel à l'écran : v1.4.", SUB);
+            py_ += 20; text(&FONT_SM, px_, py_, "Tout le système est déjà 100 % pilotable à la souris.", SUB);
         }
+
+        /* ================= 8. Mise à jour & Récupération ================= */
+        if (PTAB == 7) {
+            text(&FONT_UI, px_, py_, "Arfuso Update", LBL); py_ += 26;
+            text(&FONT_SM, px_, py_, "Version installée : Arfuso 1.3.1 (x86_64)", LBL); py_ += 32;
+            rr_fill(px_, py_, 220, 32, 5, g_accent);
+            text_center(&FONT_SM, px_ + 110, py_ + 8, "Vérifier les mises à jour", COL_WHITE);
+            zone_add(px_, py_, 220, 32, 460);
+            py_ += 42;
+            if (PMSG[0]) { text(&FONT_SM, px_, py_, PMSG, SUB); py_ += 24; }
+            text(&FONT_UI, px_, py_, "Historique", LBL); py_ += 24;
+            text(&FONT_SM, px_, py_, "23/10/2026 : v1.3.1 — Paramètres complets (9 sections).", SUB); py_ += 20;
+            text(&FONT_SM, px_, py_, "23/10/2026 : v1.3.0 — navigateur réel, premier boot guidé.", SUB);
+            py_ += 64;
+            text(&FONT_UI, px_, py_, "Récupération", LBL); py_ += 26;
+            rr_fill(px_, py_, 170, 32, 5, 0x455A64);
+            text_center(&FONT_SM, px_ + 85, py_ + 8, "Redémarrer le PC", COL_WHITE);
+            zone_add(px_, py_, 170, 32, 461);
+            rr_fill(px_ + 190, py_, 250, 32, 5, RCONF ? 0xC62828 : 0x9E9E9E);
+            text_center(&FONT_SM, px_ + 315, py_ + 8,
+                        RCONF ? "CONFIRMER : profil effacé !" : "Réinitialiser (premier boot)", COL_WHITE);
+            zone_add(px_ + 190, py_, 250, 32, 462);
+            py_ += 42;
+            text(&FONT_SM, px_, py_, "La réinitialisation relance l'assistant de premier démarrage", SUB);
+            py_ += 20; text(&FONT_SM, px_, py_, "(profil effacé ; les applications système sont conservées).", SUB);
+            py_ += 52;
+            rr_fill(px_, py_, 180, 36, 5, 0xC62828);
+            text_center(&FONT_UI, px_ + 90, py_ + 9, "Éteindre", COL_WHITE);
+            zone_add(px_, py_, 180, 36, 463);
+            rr_fill(px_ + 200, py_, 180, 36, 5, 0x455A64);
+            text_center(&FONT_UI, px_ + 290, py_ + 9, "Verrouiller", COL_WHITE);
+            zone_add(px_ + 200, py_, 180, 36, 464);
+        }
+
+        /* ================= 9. À propos ================= */
+        if (PTAB == 8) {
+            text(&FONT_UI, px_, py_, (char *)ED_NAMES[edition], LBL); py_ += 26;
+            text(&FONT_SM, px_, py_, "Version 1.3.1 — noyau 100 % maison (C + NASM), aucune base Linux.", SUB); py_ += 20;
+            text(&FONT_SM, px_, py_, "Architecture : x86_64 (BIOS El Torito)", SUB);
+            py_ += 60;
+            text(&FONT_UI, px_, py_, "Processeur", LBL); py_ += 24;
+            char brand[49];
+            cpuid_brand(brand);
+            text(&FONT_SM, px_, py_, brand, SUB);
+            py_ += 50;
+            text(&FONT_UI, px_, py_, "Mémoire vive", LBL); py_ += 24;
+            char rm[60], nb[10];
+            s_copy(rm, "≈ ", 60); u32_str(cmos_ram_mb(), nb); s_append(rm, nb, 60);
+            s_append(rm, " Mo (détection CMOS BIOS)", 60);
+            text(&FONT_SM, px_, py_, rm, SUB);
+            py_ += 50;
+            text(&FONT_UI, px_, py_, "Graphismes", LBL); py_ += 24;
+            char fb[60];
+            s_copy(fb, "Framebuffer VESA ", 60);
+            u32_str(FB_W, nb); s_append(fb, nb, 60); s_append(fb, " x ", 60);
+            u32_str(FB_H, nb); s_append(fb, nb, 60);
+            text(&FONT_SM, px_, py_, fb, SUB);
+            py_ += 52;
+            text(&FONT_UI, px_, py_, "Disque", LBL); py_ += 24;
+            char dk[60];
+            s_copy(dk, "Disque Arfuso (AFS) occupé à ", 60);
+            u32_str(afs_present() ? afs_used_pct() : 0, nb); s_append(dk, nb, 60);
+            s_append(dk, " %", 60);
+            text(&FONT_SM, px_, py_, dk, SUB);
+        }
+
         fb_flush();
         int ret = 0;
         int e = win_event(APP_PARAMS, &ret);
         if (e == -99) return ret;
-        if (e >= 200 && e < 207) { PTAB = e - 200; UEDIT = 0; PMSG[0] = 0; continue; }
-        if (e >= 230 && e < 234) { bg_mode = e - 230; wallpaper_file[0] = 0; wallpaper_active = 0; continue; }
-        if (e >= 240 && e < 252) {
-            int i = WALL_L[e - 240];
+        if (e >= 200 && e < 209) { PTAB = e - 200; UEDIT = 0; PMSG[0] = 0; RCONF = 0; continue; }
+
+        /* Système */
+        if (e == 300) { g_scale100 = 0; cfg_sav(20, 0); continue; }
+        if (e == 301) { g_scale100 = 1; cfg_sav(20, 1); continue; }
+        if (e == 302) { disp_extend = 0; continue; }
+        if (e == 303) { disp_extend = 1; continue; }
+        if (e == 304) { g_pwrmode = 0; cfg_sav(18, 0); continue; }
+        if (e == 305) { g_pwrmode = 1; cfg_sav(18, 1); continue; }
+        if (e == 306) { g_pwrmode = 2; cfg_sav(18, 2); continue; }
+        if (e >= 307 && e < 311) { g_veille = e - 307; cfg_sav(19, g_veille); continue; }
+        if (e == 311) { s_copy(PMSG, "Aucun fichier temporaire : le disque AFS compacte à l'écriture.", 90); continue; }
+
+        /* Réseau */
+        if (e == 320) { s_copy(PMSG, "DHCP relancé en arrière-plan.", 90); net_init(); continue; }
+        if (e == 321) { g_airplane = !g_airplane; continue; }
+        if (e == 322) { bt_on = !bt_on; continue; }
+
+        /* Personnalisation */
+        if (e == 340) { g_theme = 0; cfg_sav(16, 0); continue; }
+        if (e == 341) { g_theme = 1; cfg_sav(16, 1); s_copy(PMSG, "Thème clair enregistré : arrivée globale en v1.4.", 90); continue; }
+        if (e >= 350 && e < 356) { g_accent = ACCENTS[e - 350]; cfg_sav(17, e - 350); continue; }
+        if (e == 360) { g_fontbig = 0; cfg_sav(21, 0); continue; }
+        if (e == 361) { g_fontbig = 1; cfg_sav(21, 1); continue; }
+        if (e >= 370 && e < 374) { bg_mode = e - 370; wallpaper_file[0] = 0; wallpaper_active = 0; continue; }
+        if (e >= 380 && e < 383) {
+            int i = WALL_L[e - 380];
             static AfsItem IM2[12];
             afs_list((u32)FOLD_Images, IM2, 12);
             s_copy(wallpaper_file, IM2[i].name, 48);
             wallpaper_load_file();
             continue;
         }
-        if (e == 255) { /* import BMP depuis CD/USB */
+        if (e == 389) { /* import BMP depuis CD/USB */
             int done = 0;
             if (iso_present()) {
-                u32 l, s;
-                if (iso_root(&l, &s)) {
+                u32 l2, s2;
+                if (iso_root(&l2, &s2)) {
                     static IsoItem ri[32];
-                    int nr = iso_list(l, s, ri, 32);
+                    int nr = iso_list(l2, s2, ri, 32);
                     for (int i = 0; i < nr; i++) {
                         if (ri[i].is_dir) continue;
                         int ln = s_len(ri[i].name);
@@ -1660,27 +1977,51 @@ int app_params(void) {
                     done++;
                 }
             }
-            s_copy(PMSG, done ? "Image(s) importée(s) dans Dossier Images." :
-                 "Aucune image BMP trouvée sur le CD ni la clé.", 90);
-            PTAB = 0;   /* revenir au fond d'écran */
+            s_copy(PMSG, done ? "Image(s) importée(s) !" : "Aucune image BMP trouvée.", 90);
             continue;
         }
-        if (e == 260) { bt_on = !bt_on; continue; }
-        if (e == 262) { s_copy(PMSG, "DHCP relancé en arrière-plan.", 90); net_init(); continue; }
-        if (e == 270) { disp_extend = 0; continue; }
-        if (e == 271) { disp_extend = 1; continue; }
-        if (e == 280) { UEDIT = 1; continue; }
-        if (e == 281) { UEDIT = 2; continue; }
-        if (e == 282) {
+
+        /* Applications : désinstaller les scripts .arf */
+        if (e >= 390 && e < 396) {
+            static AfsItem AP2[16];
+            afs_list((u32)FOLD_Apps, AP2, 16);
+            int i = UI_ROW[e - 390];
+            if (arf_engine_of(AP2[i].node) == 200)
+                afs_delete(&AP2[i]);
+            s_copy(PMSG, "Application désinstallée.", 90);
+            continue;
+        }
+
+        /* Comptes */
+        if (e == 400) { UEDIT = 1; continue; }
+        if (e == 401) { UEDIT = 2; continue; }
+        if (e == 402) {
             if (users_add(NEWU, NEWP)) {
-                s_copy(PMSG, "Utilisateur créé (il apparaîtra à la connexion).", 90);
+                s_copy(PMSG, "Utilisateur créé.", 90);
                 NEWU[0] = 0; NEWP[0] = 0;
-            } else s_copy(PMSG, "Création impossible (existe déjà ? trop long ?).", 90);
-            PTAB = 6;   /* affiche le message */
+            } else s_copy(PMSG, "Création impossible (existe déjà ?).", 90);
             continue;
         }
-        if (e == 290) return APP_OFF;
-        if (e == 291) return APP_LOCK;
+        if (e == 403) { g_login_pwd = !g_login_pwd; cfg_sav(23, g_login_pwd); continue; }
+
+        /* Sécurité */
+        if (e == 420) { g_telemetry = !g_telemetry; cfg_sav(22, g_telemetry);
+            s_copy(PMSG, g_telemetry ? "Télémétrie automatique (aucune donnée n'est envoyée en v1.3)." : "Télémétrie désactivée.", 90); continue; }
+
+        /* Accessibilité */
+        if (e == 440) { g_hicontrast = !g_hicontrast; cfg_sav(24, g_hicontrast); continue; }
+
+        /* Mise à jour & récupération */
+        if (e == 460) { s_copy(PMSG, "Mise à jour indisponible : le navigateur ne sait pas encore le HTTPS (TLS).", 90); continue; }
+        if (e == 461) machine_reset();
+        if (e == 462) {
+            if (RCONF) { installer_cfg_set(&the_disk, 9, 0); machine_reset(); }
+            RCONF = 1; s_copy(PMSG, "Cliquez à nouveau sur le bouton rouge pour confirmer.", 90);
+            continue;
+        }
+        if (e == 463) return APP_OFF;
+        if (e == 464) return APP_LOCK;
+
         if (e >= 100000) {
             int k = e - 100000;
             if (k == 27) return 0;

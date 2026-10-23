@@ -46,6 +46,7 @@ int edition = 0;   /* 0 Professionnelle, 1 Familiale, 2 Éducation, 3 Gaming */
 const char *ED_NAMES[4] = {"Professionnelle", "Familiale", "Éducation", "Gaming"};
 const char *ED_SHORT[4]  = {"Professionnel", "Familial", "Éducation", "Gaming"};
 AtaDisk the_disk;
+static const int VEILLE_MIN_L[4] = {5, 1, 15, 0};   /* veille écran (min) */
 int disk_ok = 0;
 
 static char pw[32];
@@ -304,7 +305,7 @@ static State screen_login(void) {
             int px = ix + iw + gap;
             login_field(px, iy, iw, ih, pw, pw_len, "Mot de passe", focus == 1, 1);
             zone_add(px, iy, iw, ih, Z_LOGIN_USER + 1);
-            rr_fill(px + iw + 8, iy - 4, aw, ih + 8, 14, COL_BLUE);
+            rr_fill(px + iw + 8, iy - 4, aw, ih + 8, 14, g_accent);
             text_center(&FONT_BTN, px + iw + 8 + aw / 2, iy + ih / 2 - FONT_BTN.height / 2, "→", COL_WHITE);
             zone_add(px + iw + 8, iy - 4, aw, ih + 8, Z_LOGIN_GO);
 
@@ -354,8 +355,9 @@ validate:
                 if (USERS[u].name[i] != login_id[i]) { same = 0; break; }
             if (!same) continue;
             int pwok = 1;
-            for (int i = 0; USERS[u].pwd[i] || pw[i]; i++)
-                if (USERS[u].pwd[i] != pw[i]) { pwok = 0; break; }
+            if (!g_login_pwd)          /* connexion sans mot de passe (réglage) */
+                for (int i = 0; USERS[u].pwd[i] || pw[i]; i++)
+                    if (USERS[u].pwd[i] != pw[i]) { pwok = 0; break; }
             if (pwok) { ok = 1; uidx = u; break; }
         }
         if (ok && uidx >= 0) {
@@ -404,7 +406,7 @@ static State screen_fboot(void) {
             int iy2 = iy + ih + 22;
             login_field(ix, iy2, iw - 66, ih, pw, pw_len, "Mot de Passe", focus == 1, 1);
             zone_add(ix, iy2, iw - 66, ih, Z_LOGIN_USER + 1);
-            rr_fill(ix + iw - 58, iy2 - 4 + 4, 66, ih, 12, COL_BLUE);
+            rr_fill(ix + iw - 58, iy2 - 4 + 4, 66, ih, 12, g_accent);
             text_center(&FONT_BTN, ix + iw - 25, iy2 + ih / 2 - FONT_BTN.height / 2, "→", COL_WHITE);
             zone_add(ix + iw - 58, iy2, 66, ih, Z_LOGIN_GO);
             text_center(&FONT_SM, FB_W / 2, FB_H - 56,
@@ -594,11 +596,23 @@ static int run_app(int id) { return run_app2(id, -1); }
 
 static State screen_desktop(void) {
     CURSOR_ON = 1;
-    int dirty = 1, last_sec = -1;
+    int dirty = 1, last_sec = -1, idle_sec = 0;
     for (;;) {
         ArfDate d;
         rtc_read(&d);
-        if (d.sec != last_sec) { last_sec = d.sec; dirty = 1; }
+        if (d.sec != last_sec) { last_sec = d.sec; dirty = 1; idle_sec++; }
+        /* veille écran (réglage Système > Alimentation) */
+        if (VEILLE_MIN_L[g_veille & 3] && idle_sec >= VEILLE_MIN_L[g_veille & 3] * 60) {
+            CURSOR_ON = 0;
+            rect_fill(0, 0, FB_W, FB_H, COL_BLACK);
+            fb_flush();
+            for (;;) {
+                if (mouse_event() & 3) break;
+                if (kbd_poll()) break;
+                delay(6000);
+            }
+            idle_sec = 0; dirty = 1; CURSOR_ON = 1;
+        }
         if (dirty) {
             dirty = 0;
             draw_desktop_base(&d);
@@ -606,6 +620,7 @@ static State screen_desktop(void) {
         }
         int mev = mouse_event();
         int app = 0;
+        if (mev & 3) idle_sec = 0;
         if (mev & 1) dirty = 1;
         if (mev & 2) {
             app = zone_hit(MX, MY);
@@ -613,6 +628,7 @@ static State screen_desktop(void) {
         }
         if (!app) {
             int k = kbd_poll();
+            if (k) idle_sec = 0;
             switch (k) {
                 case 0: delay(10000); continue;
                 case 'v': case 'V': app = APP_LOCK;    break;
@@ -724,7 +740,7 @@ static void screen_not_installed(void) {
 
 void kmain(void) {
     serial_init();
-    serial_str("\n=== Arfuso Kernel 1.3 (noyau maison) ===\n");
+    serial_str("\n=== Arfuso Kernel 1.3.1 (noyau maison) ===\n");
     fb_init();
     serial_str("Framebuffer initialisé.\n");
     disk_ok = ata_find_disk(&the_disk);
@@ -757,6 +773,7 @@ void kmain(void) {
     g_kbd      = cf_kbd & 1;
     g_lang     = cf_lang & 1;
     rtc_tz     = cf_tz;
+    settings_load(&the_disk);      /* réglages persistés (thème, accent, veille...) */
     serial_str("Configuration Arfuso chargee, noyau OS lance.\n");
 
     serial_str("kmain: afs_probe...\n");
