@@ -18,6 +18,13 @@
 u32 FRAMES = 0;
 #define ticks_now() (FRAMES)
 
+/* déclarations anticipées */
+static void cpuid_brand(char out[49]);
+static u32 cmos_ram_mb(void);
+static void cfg_sav(int off, int val);
+extern int g_kbd;   /* 0 AZERTY / 1 QWERTY (défini dans installer.c) */
+static const u32 ACCENTS[6];
+
 /* ---------- zones ---------- */
 ArfZone ZONES[MAX_ZONES];
 int NZONES = 0;
@@ -68,6 +75,25 @@ static const char *fn_of(const char *nom) {
     return fn;
 }
 /* case à cocher ronde */
+/* ---------- v1.5 : le texte ne déborde JAMAIS des boutons ---------- */
+static void btn_text(int cx, int y, const char *s, int maxw, u32 col) {
+    char tmp[64];
+    s_copy(tmp, s, 64);
+    const ArfFont *f = &FONT_UI;
+    if ((int)text_w(f, tmp) > maxw) f = &FONT_SM;
+    if ((int)text_w(f, tmp) > maxw) {
+        int l = s_len(tmp);
+        while (l > 3 && (int)text_w(f, tmp) + 12 > maxw) tmp[--l] = 0;
+        tmp[l] = '.'; tmp[l + 1] = '.'; tmp[l + 2] = 0;
+    }
+    text_center(f, cx, y, tmp, col);
+}
+static void btn_fit(int x, int y, int w, int h, const char *s, u32 bg, u32 fg, int zid) {
+    rr_fill(x, y, w, h, 5, bg);
+    btn_text(x + w / 2, y + h / 2 - 8, s, w - 12, fg);
+    if (zid > 0) zone_add(x, y, w, h, zid);
+}
+
 static void radio(int x, int y, int on) {
     circle_fill(x + 12, y + 12, 11, on ? 0x1565C0 : 0xBDBDBD);
     if (on) circle_fill(x + 12, y + 12, 5, COL_WHITE);
@@ -79,9 +105,9 @@ static int s_eq(const char *a, const char *b) {
 
 /* ---------- réglages globaux ---------- */
 u32 DESK_BG = 0xFFFFFF;
-int bg_mode = 4;                       /* 4 = image FOND.BMP par défaut */
+int bg_mode = 0;                       /* couleur unie (thème) — image perso en option */
 int bt_on = 0, disp_extend = 0;
-char wallpaper_file[48] = "FOND.BMP";
+char wallpaper_file[48] = "";
 int bg_colors[4] = {0xFFFFFF, 0xE8F4FD, 0xF2F2F2, 0xFAF3E3};
 static const char *BG_NAMES[5] = {"Blanc", "Bleu ciel", "Gris clair", "Sable", "Image"};
 
@@ -160,6 +186,25 @@ void app_blocked(const char *raison) {
 ArfUser USERS[USER_MAX];
 int NUSERS = 0, CUR_USER_IDX = 0;
 
+/* ---------- v1.5 : hachage des mots de passe (djb2 doublé -> 16 hex) ---------- */
+void pwd_hash(const char *s, char out[17]) {
+    u32 h1 = 5381, h2 = 52711;
+    for (; *s; s++) {
+        h1 = (h1 * 33) ^ (u8)*s;
+        h2 = (h2 * 65599) + (u8)*s;
+    }
+    const char *HEX = "0123456789abcdef";
+    for (int i = 0; i < 8; i++) out[i] = HEX[(h1 >> (28 - 4 * i)) & 15];
+    for (int i = 0; i < 8; i++) out[8 + i] = HEX[(h2 >> (28 - 4 * i)) & 15];
+    out[16] = 0;
+}
+static int pwd_is_hash(const char *p) {   /* migration : détecte un hash hex16 */
+    if (s_len(p) != 16) return 0;
+    for (int i = 0; i < 16; i++)
+        if (!((p[i] >= '0' && p[i] <= '9') || (p[i] >= 'a' && p[i] <= 'f'))) return 0;
+    return 1;
+}
+
 void users_save(void) {
     if (!afs_present()) return;
     char buf[640]; int n = 0; buf[0] = 0;
@@ -176,7 +221,7 @@ void users_save(void) {
 void users_load(void) {
     NUSERS = 0;
     s_copy(USERS[0].name, "UTILISATEUR", 24);
-    s_copy(USERS[0].pwd, "arfuso", 24);
+    pwd_hash("arfuso", USERS[0].pwd);
     NUSERS = 1;
     CUR_USER_IDX = 0;
     if (!afs_present()) return;
@@ -196,7 +241,13 @@ void users_load(void) {
         USERS[i].pwd[w] = 0;
         while (k < n && buf[k] != '\n') k++;
         j = k + 1;
-        if (USERS[i].name[0] && USERS[i].pwd[0]) i++;
+        if (USERS[i].name[0] && USERS[i].pwd[0]) {
+            if (!pwd_is_hash(USERS[i].pwd)) {   /* migration 1.4 -> 1.5 */
+                char hh2[17]; pwd_hash(USERS[i].pwd, hh2);
+                s_copy(USERS[i].pwd, hh2, 24);
+            }
+            i++;
+        }
     }
     if (i > 0) NUSERS = i;
 }
@@ -205,7 +256,8 @@ int users_add(const char *name, const char *pwd) {
     if (NUSERS >= USER_MAX || !name[0] || !pwd[0]) return 0;
     for (int i = 0; i < NUSERS; i++) if (s_eq(USERS[i].name, name)) return 0;
     s_copy(USERS[NUSERS].name, name, 24);
-    s_copy(USERS[NUSERS].pwd, pwd, 24);
+    char hh[17]; pwd_hash(pwd, hh);
+    s_copy(USERS[NUSERS].pwd, hh, 24);   /* jamais en clair : v1.5 */
     NUSERS++;
     users_save();
     return 1;
@@ -236,13 +288,15 @@ static void seed_one(int fold, const char *file, const char *name, const char *g
 
 void installer_seed_apps(void) {
     if (!afs_present()) return;
-    seed_one(FOLD_Apps, "chrome.arf",      "Chrome",      "Ch", APP_NAV,      0x4285F4);
+    seed_one(FOLD_Apps, "arfunet.arf",     "ArfuNet",    "An", APP_NAV,      0x0B57D0);
     seed_one(FOLD_Apps, "explorateur.arf", "Explorateur", "Ex", APP_EXPLORER, 0x00897B);
     seed_one(FOLD_Apps, "arfustore.arf",   "Arfu Store",  "St", APP_STORE,    0x7B1FA2);
     seed_one(FOLD_Apps, "terminal.arf",    "Terminal",    "Te", APP_TERMINAL, 0x212121);
     seed_one(FOLD_Apps, "notes.arf",       "ArfuNotes",   "No", APP_NOTES,    0xF9A825);
     seed_one(FOLD_Apps, "parametres.arf",  "Paramètres",  "Pa", APP_PARAMS,   0x607D8B);
+    seed_one(FOLD_Apps, "arfdocs.arf",     "ArfuDocs",    "Ad", APP_DOCS,     0x1565C0);
     seed_one(FOLD_Apps, "snake.arf",       "Snake",       "Sn", APP_SNAKE,    0x1B8A3B);
+    seed_one(FOLD_Apps, "calc.arf",        "ArfuCalc",    "Ca", APP_CALC,     0xD81B60);
     /* app .arf script de démonstration : en-tête 64 o + script texte */
     seed_one(FOLD_Apps, "bienvenue.arf", "Bienvenue", "Bv", 200, 0x00BCD4);
     {
@@ -254,7 +308,7 @@ void installer_seed_apps(void) {
             const char *sc =
                 "TITRE|Bienvenue sur Arfuso 1.3\n"
                 "TXT|Ceci est une application .arf de type script.\n"
-                "TXT|Le navigateur Chrome Arfuso va sur le vrai internet (HTTP).\n"
+                "TXT|Le navigateur ArfuNet va sur le vrai internet (HTTP).\n"
                 "TXT|L'explorateur copie vos fichiers vers le disque Arfuso.\n"
                 "URL|http://neverssl.com/\n";
             int i = 64;
@@ -283,7 +337,7 @@ void notes_load(void) {}
 
 
 /* ---- ponts inter-applis ---- */
-static char LAUNCH_URL[128] = "";      /* URL à ouvrir dans Chrome */
+static char LAUNCH_URL[128] = "";      /* URL à ouvrir dans ArfuNet */
 void browser_goto(const char *u) { s_copy(LAUNCH_URL, u, 128); }
 static int  LAUNCH_ARF_IDX = -1;       /* index .arf lancé (historique) */
 static void launch_mark_arf(int i) { LAUNCH_ARF_IDX = i; }
@@ -441,7 +495,7 @@ static void tprint(const char *s) { tputc_line(s); }
 
 int app_terminal(void) {
     char in[72]; int ilen = 0;
-    if (TLPOS == 0) tprint("Arfuso Terminal v1.3 - 'aide' pour la liste");
+    if (TLPOS == 0) tprint("Arfuso Terminal v1.5 - 'aide' pour la liste");
     for (;;) {
         ArfDate d; rtc_read(&d);
         draw_desktop_base(&d);
@@ -475,10 +529,12 @@ int app_terminal(void) {
                 tprint(line);
                 /* --- exécution --- */
                 if (s_eq(in, "")) {}
-                else if (s_eq(in, "aide"))
-                    tprint("ver, edition, date, heure, clear, ip, ping HOTE, get URL,"
-                           " dns HOTE, vol, fichiers, verrouiller, exit");
-                else if (s_eq(in, "ver")) tprint("Arfuso OS 1.3.0 - noyau maison");
+                else if (s_eq(in, "aide")) {
+                    tprint("ver edition date heure clear ip ping H get URL dns H vol fichiers");
+                    tprint("ls cat F rm F ecrire F TXT apps ouvrir APP mem df about");
+                    tprint("avion on/off accent N veille MIN verrouiller eteindre exit");
+                }
+                else if (s_eq(in, "ver")) tprint("Arfuso OS 1.5.0 - noyau maison");
                 else if (s_eq(in, "edition")) tprint((char *)ED_NAMES[edition]);
                 else if (s_eq(in, "clear")) { for (int i = 0; i < 18; i++) TLINES[i][0] = 0; TLPOS = 0; }
                 else if (s_eq(in, "date") || s_eq(in, "heure")) {
@@ -565,6 +621,111 @@ int app_terminal(void) {
                     char l3[80]; s_copy(l3, "racine: ", 80);
                     char n2[8]; u32_str((u32)n, n2); s_append(l3, n2, 80);
                     s_append(l3, " entrée(s)", 80); tprint(l3);
+                }
+                else if (s_eq(in, "ls")) {
+                    static AfsItem LI[24];
+                    int n = afs_list((u32)FOLD_Docs, LI, 24);
+                    char l3[80], n2[8];
+                    s_copy(l3, "Documents: ", 80); u32_str((u32)n, n2); s_append(l3, n2, 80);
+                    s_append(l3, " entree(s)", 80); tprint(l3);
+                    int shown = 0;
+                    for (int i = 0; i < n && shown < 6; i++) {
+                        if (LI[i].type != 1) continue;
+                        s_copy(l3, "  - ", 80); s_append(l3, LI[i].name, 60); tprint(l3);
+                        shown++;
+                    }
+                }
+                else if (in[0]=='c'&&in[1]=='a'&&in[2]=='t'&&in[3]==' ') {
+                    AfsItem f;
+                    if (afs_find((u32)FOLD_Docs, in + 4, &f) == 0) {
+                        static u8 dbuf[768];
+                        int n = afs_read_file(&f, dbuf, 760);
+                        if (n > 0) {
+                            dbuf[n] = 0;
+                            char tmp[78]; int ti = 0, ln = 0;
+                            for (int i = 0; i < n && ln < 5; i++) {
+                                char c = (char)dbuf[i];
+                                if (c == '\n' || ti == 74) { tmp[ti] = 0; tprint(tmp); ti = 0; ln++; continue; }
+                                if (c >= 32) tmp[ti++] = c;
+                            }
+                            if (ti && ln < 5) { tmp[ti] = 0; tprint(tmp); }
+                        } else tprint("(vide ou illisible)");
+                    } else tprint("Introuvable dans Documents (ex: cat notes.txt)");
+                }
+                else if (in[0]=='r'&&in[1]=='m'&&in[2]==' ') {
+                    AfsItem f;
+                    if (afs_find((u32)FOLD_Docs, in + 3, &f) == 0 && afs_delete(&f))
+                        tprint("Supprime.");
+                    else tprint("Suppression impossible (introuvable ?)");
+                }
+                else if (in[0]=='e'&&in[1]=='c'&&in[2]=='r'&&in[3]=='i'&&in[4]=='r'&&in[5]=='e'&&in[6]==' ') {
+                    int i = 7, j = 0;
+                    char nm[40];
+                    while (in[i] && in[i] != ' ' && j < 38) nm[j++] = in[i++];
+                    nm[j] = 0;
+                    while (in[i] == ' ') i++;
+                    if (!nm[0] || !in[i]) tprint("Usage : ecrire nom.txt contenu du fichier");
+                    else if (afs_write_file((u32)FOLD_Docs, nm, (u8 *)(in + i), (u32)s_len(in + i)))
+                        tprint("Ecrit dans Documents.");
+                    else tprint("Ecriture impossible.");
+                }
+                else if (s_eq(in, "apps")) {
+                    static AfsItem AP2[24];
+                    int n = afs_list((u32)FOLD_Apps, AP2, 24), cnt = 0;
+                    for (int i = 0; i < n && cnt < 9; i++) {
+                        if (AP2[i].type != 1) continue;
+                        char l3[80]; s_copy(l3, "  - ", 80); s_append(l3, AP2[i].name, 60); tprint(l3);
+                        cnt++;
+                    }
+                }
+                else if (in[0]=='o'&&in[1]=='u'&&in[2]=='v'&&in[3]=='r'&&in[4]=='i'&&in[5]=='r'&&in[6]==' ') {
+                    const char *n2 = in + 7;
+                    if (s_eq(n2, "arfunet")) return APP_NAV;
+                    if (s_eq(n2, "notes")) return APP_NOTES;
+                    if (s_eq(n2, "parametres")) return APP_PARAMS;
+                    if (s_eq(n2, "store")) return APP_STORE;
+                    if (s_eq(n2, "explorateur")) return APP_EXPLORER;
+                    if (s_eq(n2, "docs")) return APP_DOCS;
+                    if (s_eq(n2, "calc")) return APP_CALC;
+                    if (s_eq(n2, "snake")) return APP_SNAKE;
+                    tprint("apps : arfunet notes parametres store explorateur docs snake calc");
+                }
+                else if (s_eq(in, "mem")) {
+                    char l[60], n2[10];
+                    s_copy(l, "RAM detectee: ", 60); u32_str(cmos_ram_mb(), n2);
+                    s_append(l, n2, 60); s_append(l, " Mo", 60); tprint(l);
+                }
+                else if (s_eq(in, "df")) {
+                    char l[60], n2[10];
+                    s_copy(l, "Disque AFS: ", 60);
+                    u32_str(afs_present() ? afs_used_pct() : 0, n2);
+                    s_append(l, n2, 60); s_append(l, " % occupes", 60); tprint(l);
+                }
+                else if (s_eq(in, "about")) {
+                    char brand[49]; cpuid_brand(brand);
+                    char l[80]; s_copy(l, "Arfuso 1.5.0 | ", 80); s_append(l, brand, 60);
+                    l[79] = 0; tprint(l);
+                }
+                else if (in[0]=='a'&&in[1]=='v'&&in[2]=='i'&&in[3]=='o'&&in[4]=='n') {
+                    if (in[5] == ' ' && in[6] == 'o' && in[7] == 'n')
+                        { g_airplane = 1; tprint("Mode avion ACTIVE (internet coupe)."); }
+                    else if (in[5] == ' ' && in[6] == 'o' && in[7] == 'f')
+                        { g_airplane = 0; tprint("Mode avion desactive."); }
+                    else tprint(g_airplane ? "avion : ACTIF" : "avion : inactif");
+                }
+                else if (in[0]=='a'&&in[1]=='c'&&in[2]=='c'&&in[3]=='e'&&in[4]=='n'&&in[5]=='t'&&in[6]==' ') {
+                    int v = in[7] - '0';
+                    if (v >= 0 && v <= 5) { g_accent = ACCENTS[v]; cfg_sav(17, v); tprint("Accent applique."); }
+                    else tprint("accent 0..5 (0 bleu 1 vert 2 rouge 3 violet 4 orange 5 sarcelle)");
+                }
+                else if (in[0]=='v'&&in[1]=='e'&&in[2]=='i'&&in[3]=='l'&&in[4]=='l'&&in[5]=='e'&&in[6]==' ') {
+                    int m = 0, i = 7;
+                    while (in[i] >= '0' && in[i] <= '9') { m = m * 10 + in[i] - '0'; i++; }
+                    int idx = m <= 5 ? 0 : m <= 10 ? 1 : m <= 15 ? 2 : 3;
+                    static const char *VM[4] = {"5", "10", "15", "30"};
+                    g_veille = idx; cfg_sav(19, idx);
+                    char l[60]; s_copy(l, "Veille reglee sur ", 60);
+                    s_append(l, VM[idx], 60); s_append(l, " minutes.", 60); tprint(l);
                 }
                 else if (s_eq(in, "verrouiller")) return APP_LOCK;
                 else if (s_eq(in, "eteindre")) return APP_OFF;
@@ -686,7 +847,7 @@ int app_script_viewer(u32 node) {
             else if (li > 4 && line[0]=='U'&&line[1]=='R'&&line[2]=='L'&&line[3]=='|') {
                 s_copy(url, line + 4, 128);
                 rr_fill(wx + 30, yy, 300, 30, 5, 0x212121);
-                text(&FONT_UI, wx + 44, yy + 6, "Ouvrir dans Chrome", COL_WHITE);
+                text(&FONT_UI, wx + 44, yy + 6, "Ouvrir dans ArfuNet", COL_WHITE);
                 zone_add(wx + 30, yy, 300, 30, 150);
                 yy += 40;
                 dlg_url = 1;
@@ -697,7 +858,7 @@ int app_script_viewer(u32 node) {
         int ret = 0;
         int e = win_event(APP_SCRIPT, &ret);
         if (e == -99) return ret;
-        if (e == 150) { /* ouvrir URL dans Chrome */
+        if (e == 150) { /* ouvrir URL dans ArfuNet */
             browser_goto(url);
             return APP_NAV;
         }
@@ -788,8 +949,59 @@ int launcher_pick(void) {
     }
 }
 
+/* ---------- v1.4 : lanceur PLEIN ÉCRAN (clic sur le logo Arfuso) ---------- */
+int launcher_full(void) {
+    launcher_collect();
+    for (;;) {
+        ArfDate d; rtc_read(&d);
+        draw_desktop_base(&d);
+        zones_clear();
+        rect_fill(0, 0, FB_W, FB_H, 0x131318);
+        rect_fill(0, 0, FB_W, 5, g_accent);
+        rect_fill(0, FB_H - 5, FB_W, 5, g_accent);
+        text(&FONT_TTL, 44, 34, "Applications", COL_WHITE);
+        text_right(&FONT_SM, FB_W - 110, 46, "Echap pour fermer", 0x8A8A90);
+        rr_fill(FB_W - 52, 28, 32, 32, 8, 0xC62828);
+        text_center(&FONT_SM, FB_W - 36, 37, "x", COL_WHITE);
+        zone_add(FB_W - 52, 28, 32, 32, 190);
+        int cols = FB_W < 900 ? 4 : (FB_W < 1200 ? 5 : 6);
+        int cw = 150, ch = 118;
+        int gx = FB_W / 2 - cols * cw / 2, gy = 108;
+        for (int i = 0; i < NLIT; i++) {
+            int col = i % cols, row = i / cols;
+            int ax = gx + col * cw, ay = gy + row * ch;
+            rr_fill(ax, ay, 136, 106, 10, 0x21212A);
+            rr_fill(ax + 40, ay + 12, 56, 56, 12, LITEMS[i].color);
+            char g[3];
+            g[0] = LITEMS[i].glyph[0] ? LITEMS[i].glyph[0] : 'A';
+            g[1] = LITEMS[i].glyph[1]; g[2] = 0;
+            if (!g[1]) { g[1] = g[0]; g[0] = ' '; }
+            text_center(&FONT_SM, ax + 68, ay + 33, g, COL_WHITE);
+            text_center(&FONT_UI, ax + 68, ay + 78, LITEMS[i].name, COL_WHITE);
+            zone_add(ax, ay, 136, 106, 200 + i);
+        }
+        if (!NLIT)
+            text(&FONT_UI, gx, gy + 20, "Aucune application (.arf) sur le disque.", 0x8A8A90);
+        fb_flush();
+        int mev = mouse_event();
+        if (mev & 2) {
+            int z = zone_hit(MX, MY);
+            if (z == 190) return APP_NONE;     /* croix rouge */
+            if (z >= 200 && z < 200 + NLIT) {
+                int i = z - 200;
+                launch_mark_arf(i);
+                return 10000 + (int)LITEMS[i].node;
+            }
+            if (z == 0) return APP_NONE;        /* clic dans le vide = fermer */
+        }
+        int k = kbd_poll();
+        if (k == 27) return APP_NONE;
+        delay(9000);
+    }
+}
+
 /* =====================================================================
- * Chrome Arfuso : navigateur web (HTTP)
+ * ArfuNet : navigateur web (HTTP)
  * ===================================================================== */
 #define PAGE_MAX 64000
 #define LINK_MAX 96
@@ -966,7 +1178,7 @@ int app_browser(void) {
         draw_desktop_base(&d);
         zones_clear();
         int cx, cy, wx, wy;
-        ui_window_at("Chrome Arfuso", 900, 560, &cx, &cy, &wx, &wy);
+        ui_window_at("ArfuNet", 900, 560, &cx, &cy, &wx, &wy);
         /* barre d'adresse */
         rr_fill(wx + 70, wy + 40, 660, 34, 6, 0xF1F3F4);
         if (!CURL[0])
@@ -1013,7 +1225,7 @@ int app_browser(void) {
             for (;;) {
                 draw_desktop_base(&d);
                 zones_clear();
-                ui_window_at("Chrome Arfuso", 900, 560, &cx, &cy, &wx, &wy);
+                ui_window_at("ArfuNet", 900, 560, &cx, &cy, &wx, &wy);
                 rr_fill(wx + 70, wy + 40, 660, 34, 6, 0xFFFFFF);
                 rect_fill(wx + 70, wy + 40, 660, 2, 0x1A73E8);
                 char disp[96]; s_copy(disp, CURL, 90);
@@ -1460,6 +1672,11 @@ int g_telemetry = 0;    /* 22: 0 jamais, 1 auto */
 int g_login_pwd = 0;    /* 23: 0 mdp exigé si le compte en a un, 1 connexion sans mdp */
 int g_hicontrast = 0;   /* 24: 0 non, 1 oui */
 int g_airplane = 0;     /* RAM : mode avion (coupe le navigateur et le Store) */
+int g_startmask  = 0;   /* v1.5 : applis lancées automatiquement au login */
+int g_pin_en    = 0;   /* v1.5 : PIN rapide */
+int g_pin[4]    = {0, 0, 0, 0};
+int lock_bg_mode = 0;   /* 0 = couleur unie, 1 = image du disque */
+int lock_bg_col  = 0;   /* indice de couleur unie du verrouillage */
 static const u32 ACCENTS[6] = {0x1A73E8, 0x2E7D32, 0xC62828, 0x7B1FA2, 0xEF6C00, 0x00838F};
 static const int VEILLE_MIN[4] = {5, 1, 15, 0};
 
@@ -1510,6 +1727,11 @@ void settings_load(AtaDisk *d) {
     if (installer_cfg_get(d, 21, &v)) g_fontbig  = v & 1;
     if (installer_cfg_get(d, 22, &v)) g_telemetry= v & 1;
     if (installer_cfg_get(d, 23, &v)) g_login_pwd= v & 1;
+    if (installer_cfg_get(d, 25, &v)) lock_bg_mode= v & 1;
+    if (installer_cfg_get(d, 26, &v)) lock_bg_col = v % 6;
+    if (installer_cfg_get(d, 28, &v)) g_startmask = v;
+    if (installer_cfg_get(d, 29, &v)) g_pin_en = v & 1;
+    for (int i = 0; i < 4; i++) if (installer_cfg_get(d, 30 + i, &v) && v <= 9) g_pin[i] = v;
     if (installer_cfg_get(d, 24, &v)) g_hicontrast = v & 1;
 }
 static void cfg_sav(int off, int val) { installer_cfg_set(&the_disk, off, (u8)val); }
@@ -1660,65 +1882,83 @@ int app_params(void) {
             if (PMSG[0]) { py_ += 40; text(&FONT_SM, px_, py_, PMSG, g_accent); }
         }
 
-        /* ================= 3. Personnalisation ================= */
+        /* ================= 3. Personnalisation (compact v1.4) ================= */
         if (PTAB == 2) {
-            text(&FONT_UI, px_, py_, "Thème", LBL); py_ += 24;
+            text(&FONT_UI, px_, py_, "Thème", LBL); py_ += 20;
             radio(px_ + 10, py_ + 8, g_theme == 0);
             text(&FONT_SM, px_ + 38, py_ + 4, "Sombre", LBL);
             zone_add(px_, py_, 110, 30, 340);
             radio(px_ + 130, py_ + 8, g_theme == 1);
-            text(&FONT_SM, px_ + 158, py_ + 4, "Clair (v1.4)", LBL);
-            zone_add(px_ + 120, py_, 140, 30, 341);
-            py_ += 38;
-            text(&FONT_UI, px_, py_, "Couleur d'accentuation", LBL); py_ += 30;
-            const char *AN[6] = {"Bleu", "Vert", "Rouge", "Violet", "Orange", "Sarcelle"};
+            text(&FONT_SM, px_ + 158, py_ + 4, "Clair", LBL);
+            zone_add(px_ + 120, py_, 156, 30, 341);
+            py_ += 34;
+            text(&FONT_UI, px_, py_, "Couleur d'accentuation", LBL); py_ += 24;
             for (int i = 0; i < 6; i++) {
-                int xx = px_ + i * 90;
-                rr_fill(xx, py_, 80, 34, 7, ACCENTS[i]);
-                if (g_accent == ACCENTS[i]) rect_fill(xx - 2, py_ - 2, 84, 4, COL_BLACK), rect_fill(xx - 2, py_ + 32, 84, 4, COL_BLACK);
-                zone_add(xx - 2, py_ - 2, 84, 38, 350 + i);
+                int xx = px_ + i * 86;
+                rr_fill(xx, py_, 78, 32, 7, ACCENTS[i]);
+                if (g_accent == ACCENTS[i]) rect_fill(xx - 2, py_ - 2, 82, 4, COL_BLACK), rect_fill(xx - 2, py_ + 30, 82, 4, COL_BLACK);
+                zone_add(xx - 2, py_ - 2, 82, 36, 350 + i);
             }
-            py_ += 46;
-            text(&FONT_UI, px_, py_, "Taille des textes", LBL); py_ += 24;
+            py_ += 42;
+            text(&FONT_UI, px_, py_, "Taille des textes", LBL); py_ += 20;
             radio(px_ + 10, py_ + 8, g_fontbig == 0);
             text(&FONT_SM, px_ + 38, py_ + 4, "Normale", LBL);
             zone_add(px_, py_, 120, 30, 360);
             radio(px_ + 140, py_ + 8, g_fontbig == 1);
-            text(&FONT_SM, px_ + 168, py_ + 4, "Grande (v1.4)", LBL);
+            text(&FONT_SM, px_ + 168, py_ + 4, "Grande", LBL);
             zone_add(px_ + 130, py_, 150, 30, 361);
-            py_ += 40;
+            py_ += 34;
 
-            text(&FONT_UI, px_, py_, "Fond d'écran & écran de verrouillage", LBL); py_ += 24;
+            text(&FONT_UI, px_, py_, "Fond d'écran du bureau", LBL); py_ += 20;
             for (int i = 0; i < 4; i++) {
                 int xx = px_ + i * 92;
-                rr_fill(xx, py_, 82, 52, 5, bg_colors[i]);
-                if (bg_mode == i) rect_fill(xx - 2, py_ - 2, 86, 4, g_accent), rect_fill(xx - 2, py_ + 50, 86, 4, g_accent);
-                zone_add(xx - 2, py_ - 2, 86, 56, 370 + i);
+                rr_fill(xx, py_, 82, 46, 5, bg_colors[i]);
+                if (bg_mode == i) rect_fill(xx - 2, py_ - 2, 86, 4, g_accent), rect_fill(xx - 2, py_ + 44, 86, 4, g_accent);
+                zone_add(xx - 2, py_ - 2, 86, 50, 370 + i);
             }
-            text(&FONT_SM, px_ + 380, py_ + 16, "Couleurs unies", SUB);
-            py_ += 64;
-            text(&FONT_SM, px_, py_, "Image personnalisée (Dossier Images, .BMP) :", SUB); py_ += 22;
+            text(&FONT_SM, px_ + 380, py_ + 14, "Couleurs unies", SUB);
+            py_ += 56;
+            text(&FONT_SM, px_, py_, "Image personnalisée (Dossier Images, .BMP) :", SUB); py_ += 18;
             static AfsItem IM[12];
             int nb = afs_list((u32)FOLD_Images, IM, 12), shown = 0;
-            for (int i = 0; i < nb && shown < 3; i++) {
+            for (int i = 0; i < nb && shown < 2; i++) {
                 if (IM[i].type != 1) continue;
                 int l = s_len(IM[i].name);
                 if (l < 4) continue;
                 char e1 = IM[i].name[l-1], e2 = IM[i].name[l-2];
                 if (!((e1=='P'||e1=='p') && (e2=='M'||e2=='m'))) continue;
                 if (bg_mode == 4 && s_eq(wallpaper_file, IM[i].name))
-                    rr_fill(px_, py_, 560, 26, 4, 0xBBDEFB);
-                else rr_fill(px_, py_, 560, 26, 4, 0xF5F5F5);
-                text(&FONT_SM, px_ + 8, py_ + 6, IM[i].name, LBL);
-                zone_add(px_, py_, 560, 26, 380 + shown);
+                    rr_fill(px_, py_, 560, 24, 4, 0xBBDEFB);
+                else rr_fill(px_, py_, 560, 24, 4, 0xF5F5F5);
+                text(&FONT_SM, px_ + 8, py_ + 5, IM[i].name, LBL);
+                zone_add(px_, py_, 560, 24, 380 + shown);
                 WALL_L[shown] = i;
-                py_ += 30; shown++;
+                py_ += 27; shown++;
             }
-            if (!shown) { text(&FONT_SM, px_, py_, "(aucune image — bouton ci-dessous pour importer)", SUB); py_ += 30; }
-            rr_fill(px_, py_, 280, 30, 5, 0x00838F);
-            text_center(&FONT_SM, px_ + 140, py_ + 7, "Importer depuis CD/USB...", COL_WHITE);
-            zone_add(px_, py_, 280, 30, 389);
-            if (PMSG[0]) text(&FONT_SM, px_ + 292, py_ + 7, PMSG, g_accent);
+            if (!shown) { text(&FONT_SM, px_, py_, "(aucune image — bouton ci-dessous pour importer)", SUB); py_ += 27; }
+            btn_fit(px_, py_, 260, 28, "Importer depuis CD/USB...", 0x00838F, COL_WHITE, 389);
+            if (PMSG[0]) text(&FONT_SM, px_ + 270, py_ + 6, PMSG, g_accent);
+            py_ += 38;
+
+            /* ---- Écran de verrouillage personnalisable (v1.4) ---- */
+            text(&FONT_UI, px_, py_, "Écran de verrouillage", LBL); py_ += 20;
+            btn_fit(px_, py_, 150, 28, "Couleur unie", lock_bg_mode == 0 ? g_accent : 0xE0E0E0,
+                    lock_bg_mode == 0 ? COL_WHITE : LBL, 470);
+            btn_fit(px_ + 160, py_, 180, 28, "Image du disque", lock_bg_mode == 1 ? g_accent : 0xE0E0E0,
+                    lock_bg_mode == 1 ? COL_WHITE : LBL, 471);
+            py_ += 36;
+            {
+                /* palette identique à celle de kernel.c (LOCK_BG) */
+                static const u32 LC[6] = { 0xF00000, 0x101015, 0x0A1428, 0x4A148C, 0x37474F, 0xF5F5F5 };
+                for (int i = 0; i < 6; i++) {
+                    int xx = px_ + i * 62;
+                    rr_fill(xx, py_, 56, 32, 6, LC[i]);
+                    if (lock_bg_mode == 0 && lock_bg_col == i)
+                        rect_fill(xx - 2, py_ - 2, 60, 4, COL_BLACK), rect_fill(xx - 2, py_ + 30, 60, 4, COL_BLACK);
+                    zone_add(xx - 2, py_ - 2, 60, 36, 472 + i);
+                }
+                text(&FONT_SM, px_ + 380, py_ + 8, "Rouge vif (maquette), sombres, violet, gris, blanc.", SUB);
+            }
         }
 
         /* ================= 4. Applications ================= */
@@ -1750,10 +1990,25 @@ int app_params(void) {
             if (!rows) { text(&FONT_SM, px_, py_, "(aucune application trouvée)", SUB); py_ += 34; }
             py_ += 12;
             text(&FONT_UI, px_, py_, "Applications par défaut", LBL); py_ += 24;
-            text(&FONT_SM, px_, py_, ".arf → Visionneuse/Arfu Store    .txt → ArfuNotes    http:// → Chrome Arfuso", SUB);
+            text(&FONT_SM, px_, py_, ".arf → Visionneuse/Arfu Store    .txt → ArfuDocs    http:// → ArfuNet", SUB);
             py_ += 30;
-            text(&FONT_UI, px_, py_, "Applications au démarrage", LBL); py_ += 24;
-            text(&FONT_SM, px_, py_, "Aucune application tierce ne démarre automatiquement au login.", SUB);
+            text(&FONT_UI, px_, py_, "Applications au démarrage", LBL); py_ += 22;
+            {
+                /* v1.5 : choix réel des applis lancées automatiquement à la connexion */
+                const char *SN[8] = {"ArfuNet","Terminal","ArfuDocs","Explorateur",
+                                     "Arfu Store","ArfuNotes","Snake","ArfuCalc"};
+                const int SD[8] = { APP_NAV, APP_TERMINAL, APP_DOCS, APP_EXPLORER,
+                                    APP_STORE, APP_NOTES, APP_SNAKE, APP_CALC };
+                for (int i = 0; i < 8; i++) {
+                    int sx = px_ + (i % 4) * 145, sy2 = py_ + (i / 4) * 38;
+                    int on = (g_startmask >> SD[i]) & 1;
+                    pill(sx, sy2, 46, on);
+                    text(&FONT_SM, sx + 56, sy2 + 2, SN[i], LBL);
+                    zone_add(sx, sy2 - 2, 136, 30, 490 + i);
+                }
+                py_ += 76;
+                text(&FONT_SM, px_, py_, "Elles se lanceront seules à chaque connexion.", SUB);
+            }
             if (PMSG[0]) { py_ += 26; text(&FONT_SM, px_, py_, PMSG, g_accent); }
         }
 
@@ -1785,9 +2040,7 @@ int app_params(void) {
             text(&FONT_UI, px_ + 138, py_ + 2, mask, LBL);
             zone_add(px_ + 130, py_ - 4, 220, 28, 401);
             py_ += 36;
-            rr_fill(px_ + 130, py_, 170, 32, 5, 0x2E7D32);
-            text_center(&FONT_SM, px_ + 215, py_ + 8, "Ajouter", COL_WHITE);
-            zone_add(px_ + 130, py_, 170, 32, 402);
+            btn_fit(px_ + 130, py_, 170, 32, "Ajouter", 0x2E7D32, COL_WHITE, 402);
             py_ += 46;
             text(&FONT_UI, px_, py_, "Options de connexion", LBL); py_ += 26;
             text(&FONT_SM, px_, py_, "Exiger le mot de passe à la connexion", SUB);
@@ -1795,7 +2048,17 @@ int app_params(void) {
             zone_add(px_ + 330, py_ - 4, 58, 30, 403);
             text(&FONT_SM, px_ + 400, py_, g_login_pwd ? "Non (connexion sans mot de passe)" : "Oui (si le compte en a un)", SUB);
             py_ += 40;
-            text(&FONT_SM, px_, py_, "PIN / biométrie / clé de sécurité : aucun capteur sur cette machine.", SUB);
+            text(&FONT_SM, px_, py_, "Biométrie / clé de sécurité : aucun capteur sur cette machine.", SUB); py_ += 24;
+            text(&FONT_SM, px_, py_, "PIN rapide (4 chiffres) :", SUB); py_ += 22;
+            rr_fill(px_, py_, 120, 32, 5, UEDIT == 3 ? 0xFFF8E1 : 0xF5F5F5);
+            {
+                char pd[8] = "---";
+                if (g_pin_en) { pd[0]=0; pd[1]=0; for (int i = 0; i < 4; i++) { pd[i] = '*'; pd[i+1] = 0; } }
+                text_center(&FONT_UI, px_ + 60, py_ + 7, pd, COL_DARKTXT);
+            }
+            zone_add(px_, py_, 120, 32, 448);
+            text(&FONT_SM, px_ + 130, py_ + 8, PMSG, SUB);
+            py_ += 40;
             py_ += 20; text(&FONT_SM, px_, py_, "Synchronisation cloud : non disponible en v1.3.", SUB);
         }
 
@@ -1831,55 +2094,56 @@ int app_params(void) {
             pill(px_ + 330, py_ - 4, 58, g_hicontrast);
             zone_add(px_ + 330, py_ - 4, 58, 30, 440);
             py_ += 44;
-            text(&FONT_SM, px_, py_, "Filtres de couleur (daltonisme) globaux : v1.4.", SUB); py_ += 20;
-            text(&FONT_SM, px_, py_, "Loupe logicielle / lecteur d'écran : v1.4.", SUB); py_ += 20;
+            text(&FONT_SM, px_, py_, "Filtres de couleur (daltonisme) globaux : prévus en v1.6.", SUB); py_ += 20;
+            text(&FONT_SM, px_, py_, "Loupe logicielle / lecteur d'écran : prévus en v1.6.", SUB); py_ += 20;
             text(&FONT_SM, px_, py_, "Taille des textes : Personnalisation > Taille des textes.", SUB);
             py_ += 40;
             text(&FONT_UI, px_, py_, "Audition", LBL); py_ += 26;
             text(&FONT_SM, px_, py_, "Sortie son indisponible : sous-titres et audio mono sans objet.", SUB);
             py_ += 46;
             text(&FONT_UI, px_, py_, "Interaction", LBL); py_ += 26;
-            text(&FONT_SM, px_, py_, "Clavier visuel à l'écran : v1.4.", SUB);
+            text(&FONT_SM, px_, py_, "Clavier visuel à l'écran : prévu en v1.6.", SUB);
             py_ += 20; text(&FONT_SM, px_, py_, "Tout le système est déjà 100 % pilotable à la souris.", SUB);
+            py_ += 28;
+            text(&FONT_SM, px_, py_, "Disposition du clavier :", SUB);
+            pill(px_ + 190, py_ - 2, 40, g_kbd == 0);
+            text(&FONT_SM, px_ + 236, py_, "AZERTY", LBL);
+            zone_add(px_ + 190, py_ - 4, 96, 26, 445);
+            pill(px_ + 300, py_ - 2, 40, g_kbd == 1);
+            text(&FONT_SM, px_ + 346, py_, "QWERTY", LBL);
+            zone_add(px_ + 300, py_ - 4, 100, 26, 446);
         }
 
         /* ================= 8. Mise à jour & Récupération ================= */
         if (PTAB == 7) {
             text(&FONT_UI, px_, py_, "Arfuso Update", LBL); py_ += 26;
-            text(&FONT_SM, px_, py_, "Version installée : Arfuso 1.3.1 (x86_64)", LBL); py_ += 32;
-            rr_fill(px_, py_, 220, 32, 5, g_accent);
-            text_center(&FONT_SM, px_ + 110, py_ + 8, "Vérifier les mises à jour", COL_WHITE);
-            zone_add(px_, py_, 220, 32, 460);
+            text(&FONT_SM, px_, py_, "Version installée : Arfuso 1.5.0 (x86_64)", LBL); py_ += 32;
+            btn_fit(px_, py_, 220, 32, "Vérifier les mises à jour", g_accent, COL_WHITE, 460);
             py_ += 42;
             if (PMSG[0]) { text(&FONT_SM, px_, py_, PMSG, SUB); py_ += 24; }
             text(&FONT_UI, px_, py_, "Historique", LBL); py_ += 24;
-            text(&FONT_SM, px_, py_, "23/10/2026 : v1.3.1 — Paramètres complets (9 sections).", SUB); py_ += 20;
-            text(&FONT_SM, px_, py_, "23/10/2026 : v1.3.0 — navigateur réel, premier boot guidé.", SUB);
+            text(&FONT_SM, px_, py_, "23/10/2026 : v1.5.0 — thème clair/sombre réel, calculatrice, notifications + bip, apps au démarrage, PIN, mdp hachés.", SUB); py_ += 16;
+            text(&FONT_SM, px_, py_, "23/10/2026 : v1.4.0 — lanceur plein écran, verrouillage personnalisable, ArfuDocs, ArfuNet.", SUB); py_ += 16;
+            text(&FONT_SM, px_, py_, "23/10/2026 : v1.3.1 — Paramètres complets (9 sections).", SUB); py_ += 16;
+            text(&FONT_SM, px_, py_, "23/10/2026 : v1.3.0 — navigateur réel, premier boot guidé.", SUB); py_ += 48;
             py_ += 64;
             text(&FONT_UI, px_, py_, "Récupération", LBL); py_ += 26;
-            rr_fill(px_, py_, 170, 32, 5, 0x455A64);
-            text_center(&FONT_SM, px_ + 85, py_ + 8, "Redémarrer le PC", COL_WHITE);
-            zone_add(px_, py_, 170, 32, 461);
-            rr_fill(px_ + 190, py_, 250, 32, 5, RCONF ? 0xC62828 : 0x9E9E9E);
-            text_center(&FONT_SM, px_ + 315, py_ + 8,
-                        RCONF ? "CONFIRMER : profil effacé !" : "Réinitialiser (premier boot)", COL_WHITE);
-            zone_add(px_ + 190, py_, 250, 32, 462);
+            btn_fit(px_, py_, 170, 32, "Redémarrer le PC", 0x455A64, COL_WHITE, 461);
+            btn_fit(px_ + 190, py_, 250, 32,
+                    RCONF ? "CONFIRMER : profil effacé !" : "Réinitialiser (premier boot)",
+                    RCONF ? 0xC62828 : 0x9E9E9E, COL_WHITE, 462);
             py_ += 42;
             text(&FONT_SM, px_, py_, "La réinitialisation relance l'assistant de premier démarrage", SUB);
             py_ += 20; text(&FONT_SM, px_, py_, "(profil effacé ; les applications système sont conservées).", SUB);
             py_ += 52;
-            rr_fill(px_, py_, 180, 36, 5, 0xC62828);
-            text_center(&FONT_UI, px_ + 90, py_ + 9, "Éteindre", COL_WHITE);
-            zone_add(px_, py_, 180, 36, 463);
-            rr_fill(px_ + 200, py_, 180, 36, 5, 0x455A64);
-            text_center(&FONT_UI, px_ + 290, py_ + 9, "Verrouiller", COL_WHITE);
-            zone_add(px_ + 200, py_, 180, 36, 464);
+            btn_fit(px_, py_, 180, 36, "Éteindre", 0xC62828, COL_WHITE, 463);
+            btn_fit(px_ + 200, py_, 180, 36, "Verrouiller", 0x455A64, COL_WHITE, 464);
         }
 
         /* ================= 9. À propos ================= */
         if (PTAB == 8) {
             text(&FONT_UI, px_, py_, (char *)ED_NAMES[edition], LBL); py_ += 26;
-            text(&FONT_SM, px_, py_, "Version 1.3.1 — noyau 100 % maison (C + NASM), aucune base Linux.", SUB); py_ += 20;
+            text(&FONT_SM, px_, py_, "Version 1.5.0 — noyau 100 % maison (C + NASM), aucune base Linux.", SUB); py_ += 20;
             text(&FONT_SM, px_, py_, "Architecture : x86_64 (BIOS El Torito)", SUB);
             py_ += 60;
             text(&FONT_UI, px_, py_, "Processeur", LBL); py_ += 24;
@@ -1932,7 +2196,7 @@ int app_params(void) {
 
         /* Personnalisation */
         if (e == 340) { g_theme = 0; cfg_sav(16, 0); continue; }
-        if (e == 341) { g_theme = 1; cfg_sav(16, 1); s_copy(PMSG, "Thème clair enregistré : arrivée globale en v1.4.", 90); continue; }
+        if (e == 341) { g_theme = 1; cfg_sav(16, 1); s_copy(PMSG, "Thème clair : appliqué immédiatement à tout le système.", 90); continue; }
         if (e >= 350 && e < 356) { g_accent = ACCENTS[e - 350]; cfg_sav(17, e - 350); continue; }
         if (e == 360) { g_fontbig = 0; cfg_sav(21, 0); continue; }
         if (e == 361) { g_fontbig = 1; cfg_sav(21, 1); continue; }
@@ -1981,6 +2245,15 @@ int app_params(void) {
             continue;
         }
 
+        /* Écran de verrouillage (v1.4) */
+        if (e == 470) { lock_bg_mode = 0; cfg_sav(25, 0); continue; }
+        if (e == 471) { lock_bg_mode = 1; cfg_sav(25, 1); continue; }
+        if (e >= 472 && e < 478) {
+            lock_bg_col = e - 472; lock_bg_mode = 0;
+            cfg_sav(25, 0); cfg_sav(26, lock_bg_col);
+            continue;
+        }
+
         /* Applications : désinstaller les scripts .arf */
         if (e >= 390 && e < 396) {
             static AfsItem AP2[16];
@@ -1989,6 +2262,17 @@ int app_params(void) {
             if (arf_engine_of(AP2[i].node) == 200)
                 afs_delete(&AP2[i]);
             s_copy(PMSG, "Application désinstallée.", 90);
+            continue;
+        }
+
+        /* Applications au démarrage (v1.5) */
+        if (e >= 490 && e < 498) {
+            const int SD[8] = { APP_NAV, APP_TERMINAL, APP_DOCS, APP_EXPLORER,
+                                APP_STORE, APP_NOTES, APP_SNAKE, APP_CALC };
+            int id = SD[e - 490];
+            g_startmask ^= (1 << id);
+            cfg_sav(28, g_startmask);
+            notif_push("Choix au démarrage enregistré.");
             continue;
         }
 
@@ -2003,6 +2287,7 @@ int app_params(void) {
             continue;
         }
         if (e == 403) { g_login_pwd = !g_login_pwd; cfg_sav(23, g_login_pwd); continue; }
+        if (e == 448) { UEDIT = 3; NEWP[0] = 0; continue; }
 
         /* Sécurité */
         if (e == 420) { g_telemetry = !g_telemetry; cfg_sav(22, g_telemetry);
@@ -2010,6 +2295,10 @@ int app_params(void) {
 
         /* Accessibilité */
         if (e == 440) { g_hicontrast = !g_hicontrast; cfg_sav(24, g_hicontrast); continue; }
+
+        /* Accessibilité : clavier AZERTY/QWERTY (v1.5) */
+        if (e == 445) { g_kbd = 0; cfg_sav(6, 0); notif_push("Clavier AZERTY actif."); continue; }
+        if (e == 446) { g_kbd = 1; cfg_sav(6, 1); notif_push("Clavier QWERTY actif."); continue; }
 
         /* Mise à jour & récupération */
         if (e == 460) { s_copy(PMSG, "Mise à jour indisponible : le navigateur ne sait pas encore le HTTPS (TLS).", 90); continue; }
@@ -2025,6 +2314,26 @@ int app_params(void) {
         if (e >= 100000) {
             int k = e - 100000;
             if (k == 27) return 0;
+            if (UEDIT == 3) {
+                /* saisie du PIN : 4 chiffres enregistrés directement */
+                if (k == 8) { /* retour arrière */ }
+                else if (k == 27) UEDIT = 0;
+                else if (k >= '0' && k <= '9') {
+                    int l = 4 - 1 > 0 ? 4 : 4;
+                    (void)l;
+                    /* on stocke dans NEWP puis on sauve */
+                    int ln2 = s_len(NEWP);
+                    if (ln2 < 4) { NEWP[ln2] = (char)k; NEWP[ln2 + 1] = 0; }
+                    if (s_len(NEWP) == 4) {
+                        for (int i = 0; i < 4; i++) g_pin[i] = NEWP[i] - '0', cfg_sav(30 + i, g_pin[i]);
+                        g_pin_en = 1; cfg_sav(29, 1);
+                        s_copy(PMSG, "PIN enregistré.", 90);
+                        NEWP[0] = 0; UEDIT = 0;
+                        notif_push("PIN rapide activé !");
+                    }
+                }
+                continue;
+            }
             if (UEDIT) {
                 char *buf = UEDIT == 1 ? NEWU : NEWP;
                 int l = s_len(buf);
@@ -2034,6 +2343,361 @@ int app_params(void) {
             }
             continue;
         }
+    }
+}
+
+/* =====================================================================
+ * ArfuDocs v1.4 : traitement de texte maison
+ * ===================================================================== */
+#define DOC_MAXL 22
+#define DOC_LLEN 110
+static char DOCL[DOC_MAXL][DOC_LLEN];
+static int  DOCN  = 0;      /* nombre de lignes */
+static int  DOCC  = 0;      /* ligne courante */
+static int  DOCB  = 0;      /* gras simulé */
+static int  DOCSP = 0;      /* interligne x1.5 */
+static char DOCNAM[40] = "document.adoc";
+static char DOCMSG[90] = "";
+static int  DOCOPN = 0;     /* panneau Ouvrir */
+static int  NAMED  = 0;     /* édition du nom de fichier */
+
+static void doc_new(void) {
+    for (int i = 0; i < DOC_MAXL; i++) DOCL[i][0] = 0;
+    DOCN = 1; DOCC = 0; DOCMSG[0] = 0;
+    s_copy(DOCNAM, "document.adoc", 40);
+}
+static int doc_words(void) {
+    int w = 0;
+    for (int i = 0; i < DOCN; i++) {
+        int inw = 0;
+        for (int j = 0; DOCL[i][j]; j++) {
+            if (DOCL[i][j] > 32) { if (!inw) { w++; inw = 1; } }
+            else inw = 0;
+        }
+    }
+    return w;
+}
+static int doc_chars(void) {
+    int c = 0;
+    for (int i = 0; i < DOCN; i++) c += s_len(DOCL[i]);
+    return c;
+}
+static void doc_sauver(void) {
+    static u8 buf[DOC_MAXL * (DOC_LLEN + 1)];
+    int n = 0;
+    for (int i = 0; i < DOCN && n < (int)sizeof(buf) - 2; i++) {
+        for (int j = 0; DOCL[i][j]; j++) buf[n++] = (u8)DOCL[i][j];
+        buf[n++] = '\n';
+    }
+    if (afs_write_file((u32)FOLD_Docs, DOCNAM, buf, (u32)n))
+        s_copy(DOCMSG, "Enregistre dans Documents.", 90);
+    else
+        s_copy(DOCMSG, "Enregistrement impossible (disque plein ?).", 90);
+}
+static void doc_charger(AfsItem *f) {
+    static u8 buf[DOC_MAXL * (DOC_LLEN + 1)];
+    int n = afs_read_file(f, buf, (int)sizeof(buf) - 1);
+    if (n < 0) { s_copy(DOCMSG, "Lecture impossible.", 90); return; }
+    buf[n] = 0;
+    doc_new();
+    DOCN = 0;
+    int col = 0;
+    for (int i = 0; i < n && DOCN < DOC_MAXL; i++) {
+        char c = (char)buf[i];
+        if (c == '\r') continue;
+        if (c == '\n') { DOCL[DOCN][col] = 0; DOCN++; col = 0; continue; }
+        if (col < DOC_LLEN - 1) DOCL[DOCN][col++] = c;
+    }
+    DOCL[DOCN][col] = 0; DOCN++;
+    if (DOCN <= 0) DOCN = 1;
+    DOCC = 0;
+    s_copy(DOCNAM, f->name, 40);
+    DOCMSG[0] = 0;
+}
+static void doc_text(const ArfFont *f2, int x, int y, const char *s, u32 c) {
+    text(f2, x, y, s, c);
+    if (DOCB) text(f2, x + 1, y, s, c);   /* gras simulé */
+}
+
+int app_docs(void) {
+    if (DOCN == 0) doc_new();
+    for (;;) {
+        ArfDate d; rtc_read(&d);
+        draw_desktop_base(&d);
+        zones_clear();
+        int cx, cy, wx, wy;
+        ui_window_at("ArfuDocs - traitement de texte", 900, 610, &cx, &cy, &wx, &wy);
+        int px_ = wx + 24, py_ = wy + 56;
+
+        /* ---- barre d'outils ---- */
+        const char *LBL2[4] = {"Nouveau", "Enregistrer", "Ouvrir", "Gras"};
+        const int   BW[4]   = {90, 120, 90, 80};
+        const int   BX[4]   = {0, 100, 230, 330};
+        for (int i = 0; i < 4; i++) {
+            u32 bc = (i == 3 && DOCB) ? g_accent : 0x37474F;
+            btn_fit(px_ + BX[i], py_, BW[i], 30, LBL2[i], bc, COL_WHITE, 480 + i);
+        }
+        btn_fit(px_ + 420, py_, 120, 30, "Interligne x2", DOCSP ? g_accent : 0x37474F, COL_WHITE, 484);
+        /* nom du fichier (cliquer pour renommer) */
+        rr_fill(px_ + 552, py_, 300, 30, 5, NAMED ? 0xFFF8E1 : 0xF5F5F5);
+        text(&FONT_SM, px_ + 562, py_ + 7, DOCNAM, 0x424242);
+        zone_add(px_ + 552, py_, 300, 30, 499);
+        py_ += 40;
+        if (DOCMSG[0]) { text(&FONT_SM, px_, py_, DOCMSG, g_accent); py_ += 22; }
+
+        /* ---- panneau Ouvrir (modal simple) ---- */
+        if (DOCOPN) {
+            rr_fill(px_, py_, 560, 200, 8, 0xFAFAFA);
+            text(&FONT_UI, px_ + 12, py_ + 10, "Ouvrir un document (clic titre = fermer) :", COL_DARKTXT);
+            zone_add(px_, py_, 560, 26, 549);
+            static AfsItem FT[8];
+            int nf = afs_list((u32)FOLD_Docs, FT, 8), shown = 0;
+            int oy = py_ + 40;
+            for (int i = 0; i < nf && shown < 5; i++) {
+                if (FT[i].type != 1) continue;
+                rr_fill(px_ + 12, oy, 536, 26, 4, 0xEEEEEE);
+                char sz[40], nb2[8];
+                s_copy(sz, FT[i].name, 28);
+                s_append(sz, " ", 40); u32_str(FT[i].size, nb2); s_append(sz, nb2, 40); s_append(sz, " o", 40);
+                text(&FONT_SM, px_ + 22, oy + 6, sz, 0x212121);
+                zone_add(px_ + 12, oy, 536, 26, 550 + shown);
+                shown++; oy += 30;
+            }
+            if (!shown) text(&FONT_SM, px_ + 22, oy + 4, "(aucun document dans le dossier)", 0x757575);
+            fb_flush();
+            int ret = 0; int e = win_event(APP_DOCS, &ret);
+            if (e == -99) return ret;
+            if (e == 549) { DOCOPN = 0; continue; }
+            if (e >= 550 && e < 555) {
+                static AfsItem FT2[8];
+                int nf2 = afs_list((u32)FOLD_Docs, FT2, 8), s2 = 0;
+                for (int i = 0; i < nf2; i++) {
+                    if (FT2[i].type != 1) continue;
+                    if (s2 == e - 550) { doc_charger(&FT2[i]); break; }
+                    s2++;
+                }
+                DOCOPN = 0; continue;
+            }
+            if (e >= 100000 && (e - 100000) == 27) { DOCOPN = 0; continue; }
+            continue;
+        }
+
+        /* ---- zone de rédaction ---- */
+        int lh = DOCSP ? 30 : 20;
+        rr_fill(px_, py_, 852, DOC_MAXL * lh + 16, 4, 0xFDFDFD);
+        int ly = py_ + 8;
+        for (int i = 0; i < DOCN; i++) {
+            int titre = (DOCL[i][0] == '#' && DOCL[i][1] == ' ');
+            if (i == DOCC) rr_fill(px_ + 6, ly - 2, 838, (titre ? 22 : 18) + 2, 3, 0xFFF3D6);
+            if (titre) doc_text(&FONT_UI, px_ + 12, ly, DOCL[i] + 2, 0x1A237E);
+            else       doc_text(&FONT_SM, px_ + 12, ly + 1, DOCL[i], 0x212121);
+            ly += lh;
+        }
+        /* insertion : curseur clignotant en fin de ligne courante */
+        if ((FRAMES / 6) % 2 == 0) {
+            int titre = (DOCL[DOCC][0] == '#' && DOCL[DOCC][1] == ' ');
+            const ArfFont *cf = titre ? &FONT_UI : &FONT_SM;
+            int cw2 = text_w(cf, titre ? DOCL[DOCC] + 2 : DOCL[DOCC]);
+            rect_fill(px_ + 14 + cw2, py_ + 6 + DOCC * lh, 2, cf->height, g_accent);
+        }
+        py_ += DOC_MAXL * lh + 22;
+
+        /* ---- barre d'état ---- */
+        char st[96], nb2[10];
+        s_copy(st, "Lignes ", 96); u32_str((u32)DOCN, nb2); s_append(st, nb2, 96);
+        s_append(st, "  Mots ", 96); u32_str((u32)doc_words(), nb2); s_append(st, nb2, 96);
+        s_append(st, "  Caracteres ", 96); u32_str((u32)doc_chars(), nb2); s_append(st, nb2, 96);
+        text(&FONT_SM, px_, py_ + 4, st, 0x757575);
+        text_right(&FONT_SM, px_ + 852, py_ + 4, "# + espace = titre ; Entree = ligne ; haut/bas", 0x9E9E9E);
+        fb_flush();
+
+        int ret = 0;
+        int e = win_event(APP_DOCS, &ret);
+        if (e == -99) return ret;
+        if (e == 480) { doc_new(); NAMED = 0; continue; }
+        if (e == 481) { doc_sauver(); continue; }
+        if (e == 482) { DOCOPN = 1; continue; }
+        if (e == 483) { DOCB = !DOCB; continue; }
+        if (e == 484) { DOCSP = !DOCSP; continue; }
+        if (e == 499) { NAMED = 1; continue; }
+        if (e >= 200000) {
+            int k = e - 200000;
+            if (!NAMED) {
+                if (k == KEY_UP && DOCC > 0) DOCC--;
+                if (k == KEY_DOWN && DOCC < DOCN - 1) DOCC++;
+            }
+            continue;
+        }
+        if (e >= 100000) {
+            int k = e - 100000;
+            if (k == 27) return 0;
+            if (NAMED) {           /* édition du nom de fichier */
+                int l = s_len(DOCNAM);
+                if (k == 8) { if (l) DOCNAM[l - 1] = 0; }
+                else if (k == '\r' || k == '\n' || k == 27) NAMED = 0;
+                else if (k >= 32 && l < 38) { DOCNAM[l] = (char)k; DOCNAM[l + 1] = 0; }
+                continue;
+            }
+            if (k == 8) {
+                int l = s_len(DOCL[DOCC]);
+                if (l) DOCL[DOCC][l - 1] = 0;
+                else if (DOCC > 0) {   /* fusion vers le haut (retour arrière) */
+                    for (int i = DOCC; i < DOCN - 1; i++) s_copy(DOCL[i], DOCL[i + 1], DOC_LLEN);
+                    DOCL[DOCN - 1][0] = 0;
+                    DOCN--; DOCC--;
+                    if (DOCN < 1) { DOCN = 1; DOCC = 0; }
+                }
+            } else if (k == '\r' || k == '\n') {
+                if (DOCN < DOC_MAXL) {
+                    for (int i = DOCN; i > DOCC + 1; i--) s_copy(DOCL[i], DOCL[i - 1], DOC_LLEN);
+                    DOCL[DOCC + 1][0] = 0;
+                    DOCN++; DOCC++;
+                }
+            } else if (k >= 32) {
+                int l = s_len(DOCL[DOCC]);
+                if (l < DOC_LLEN - 1) { DOCL[DOCC][l] = (char)k; DOCL[DOCC][l + 1] = 0; }
+            }
+            continue;
+        }
+        if (FRAMES % 8 == 0) continue;   /* rafraîchit le curseur */
+    }
+}
+
+/* =====================================================================
+ * ArfuCalc v1.5 : calculatrice
+ * ===================================================================== */
+static char CALC_A[20] = "", CALC_B[20] = "";
+static char CALC_OP = 0;
+static char CALC_DISP[24] = "0";
+static char CALC_ERR[6] = "";
+static long calc_parse(const char *s) {
+    long v = 0; int i = 0, neg = 0;
+    if (s[0] == '-') { neg = 1; i = 1; }
+    while (s[i] >= '0' && s[i] <= '9') { v = v * 10 + s[i] - '0'; i++; }
+    return neg ? -v : v;
+}
+static void calc_result(void) {
+    long va = calc_parse(*CALC_A ? CALC_A : "0");
+    if (!CALC_OP) return;
+    long vb = calc_parse(*CALC_B ? CALC_B : "0"), r = 0;
+    if (CALC_OP == '+') r = va + vb;
+    else if (CALC_OP == '-') r = va - vb;
+    else if (CALC_OP == '*') r = va * vb;
+    else if (CALC_OP == '/') { if (!vb) { s_copy(CALC_DISP, "Erreur", 24); CALC_A[0] = 0; CALC_B[0] = 0; CALC_OP = 0; return; } r = va / vb; }
+    /* long -> ascii */
+    char t[24]; int neg = r < 0; u32 uv = neg ? (u32)(-r) : (u32)r;
+    u32_str(uv, t);
+    char o[24]; o[0] = neg ? '-' : 0; o[1] = 0;
+    int i = 0, j = neg ? 1 : 0;
+    while (t[i] && j < 22) o[j++] = t[i++];
+    o[j] = 0;
+    s_copy(CALC_DISP, o, 24); s_copy(CALC_A, o, 20);
+    CALC_B[0] = 0; CALC_OP = 0;
+}
+static void calc_key(char c) {
+    char *cur = CALC_OP ? CALC_B : CALC_A;
+    if (c >= '0' && c <= '9') {
+        int l = s_len(cur);
+        if (l < 18) { cur[l] = c; cur[l + 1] = 0; }
+    } else if (c == '+' || c == '-' || c == '*' || c == '/') {
+        if (CALC_OP && CALC_B[0]) calc_result();
+        CALC_OP = c;
+        if (!CALC_A[0]) s_copy(CALC_A, CALC_DISP, 20);
+    } else if (c == '=') { calc_result(); }
+    else if (c == 'C') { CALC_A[0] = 0; CALC_B[0] = 0; CALC_OP = 0; s_copy(CALC_DISP, "0", 24); }
+    else if (c == 'B') { /* retour */
+        int l = s_len(cur);
+        if (l) { cur[--l] = 0; }
+    }
+    /* affichage courant */
+    {
+        char *shown = CALC_OP ? CALC_B : CALC_A;
+        if (shown[0]) s_copy(CALC_DISP, shown, 24);
+        else if (CALC_OP) { long va = calc_parse(CALC_A); char t[24]; u32_str(va < 0 ? (u32)(-va) : (u32)va, t); char o[24]; int i = 0, j = va < 0 ? 1 : 0; if (va < 0) o[0] = '-'; while (t[i] && j < 22) o[j++] = t[i++]; o[j] = 0; s_copy(CALC_DISP, o, 24); }
+        else if (!CALC_A[0]) s_copy(CALC_DISP, "0", 24);
+    }
+}
+int app_calc(void) {
+    for (;;) {
+        ArfDate d; rtc_read(&d);
+        draw_desktop_base(&d);
+        zones_clear();
+        int cx, cy, wx, wy;
+        ui_window_at("ArfuCalc", 340, 470, &cx, &cy, &wx, &wy);
+        int px_ = wx + 20, py_ = wy + 50;
+        rr_fill(px_, py_, 300, 46, 6, 0x101018);
+        { char d2[24]; s_copy(d2, CALC_DISP, 24);
+          const ArfFont *f = &FONT_UI;
+          if ((int)text_w(f, d2) > 276) f = &FONT_SM;
+          text_right(f, px_ + 288, py_ + 14, d2, 0x9BE89B); }
+        if (CALC_OP) { char op[2] = { CALC_OP, 0 }; text(&FONT_UI, px_ + 8, py_ + 14, op, 0x616161); }
+        py_ += 56;
+        const char *GRD[16] = { "7","8","9","/","4","5","6","*","1","2","3","-","0","C","=","+" };
+        for (int i = 0; i < 16; i++) {
+            int bx = px_ + (i % 4) * 76, by = py_ + (i / 4) * 66;
+            u32 bg = (i % 4 == 3) ? 0x37474F : (GRD[i][0] == '=' ? g_accent : 0xF2F2F2);
+            u32 fg = (i % 4 == 3 || GRD[i][0] == '=') ? COL_WHITE : 0x212121;
+            btn_fit(bx, by, 70, 60, GRD[i], bg, fg, 96 + i);
+        }
+        py_ += 4 * 66 + 10;
+        text(&FONT_SM, px_, py_, "Clavier : 0-9 + - * / Entree Retour", 0x9E9E9E);
+        fb_flush();
+        int ret = 0;
+        int e = win_event(APP_CALC, &ret);
+        if (e == -99) return ret;
+        if (e >= 96 && e < 112) { calc_key(GRD[e - 96][0]); continue; }
+        if (e >= 100000) {
+            int k = e - 100000;
+            if (k == 27) return 0;
+            if (k == 8) calc_key('B');
+            else if (k == '\r' || k == '\n') calc_key('=');
+            else if ((k >= '0' && k <= '9') || k == '+' || k == '-' || k == '*' || k == '/') calc_key((char)k);
+            continue;
+        }
+    }
+}
+
+/* =====================================================================
+ * v1.5 : notifications discrètes en haut à droite + petit bip PC speaker
+ * ===================================================================== */
+#define NOTIF_MAX 3
+static char NOTIF[NOTIF_MAX][96];
+static u32  NOTIF_AT[NOTIF_MAX];
+static int  NNOTIF = 0;
+
+static void spk_off(void) { outb(0x61, inb(0x61) & 0xFC); }
+static void spk_on(int f) {
+    int div = 1193180 / f;
+    outb(0x43, 0xB6); outb(0x42, (u8)(div & 0xFF)); outb(0x42, (u8)((div >> 8) & 0xFF));
+    outb(0x61, inb(0x61) | 3);
+}
+
+void notif_push(const char *msg) {
+    if (NNOTIF >= NOTIF_MAX) {
+        for (int i = 0; i < NNOTIF - 1; i++) { s_copy(NOTIF[i], NOTIF[i + 1], 96); NOTIF_AT[i] = NOTIF_AT[i + 1]; }
+        NNOTIF = NOTIF_MAX - 1;
+    }
+    s_copy(NOTIF[NNOTIF], msg, 96);
+    NOTIF_AT[NNOTIF] = FRAMES;
+    NNOTIF++;
+    spk_on(880); delay(60000); spk_off();
+}
+
+void notif_draw(void) {
+    int y = 66, shown = 0;
+    for (int i = NNOTIF - 1; i >= 0 && shown < 3; i--) {
+        if (FRAMES - NOTIF_AT[i] > 60 * 7) continue;   /* ~7 s */
+        int w = (int)text_w(&FONT_SM, NOTIF[i]) + 64;
+        if (w > 430) w = 430;
+        if (w < 260) w = 260;
+        int x = FB_W - w - 14;
+        rr_fill(x + 3, y + 4, w, 42, 8, 0x8A8A8A);
+        rr_fill(x, y, w, 42, 8, 0xFFFFFF);
+        rr_fill(x, y, 5, 42, 4, g_accent);
+        char tmp[64]; s_copy(tmp, NOTIF[i], 64);
+        while ((int)text_w(&FONT_SM, tmp) > w - 52 && s_len(tmp) > 4) tmp[s_len(tmp) - 1] = 0;
+        text(&FONT_SM, x + 14, y + 13, tmp, 0x212121);
+        y += 48; shown++;
     }
 }
 
@@ -2070,7 +2734,7 @@ int topbar_open(int kind) {
             rr_fill(x + 20, y + 130, 200, 34, 5, 0x1565C0);
             text_center(&FONT_UI, x + 120, y + 138, "Paramètres réseau", COL_WHITE);
             zone_add(x + 20, y + 130, 200, 34, 600);
-            text(&FONT_SM, x + 20, y + 178, "Le Chrome se sert de la connexion Ethernet.", 0x757575);
+            text(&FONT_SM, x + 20, y + 178, "ArfuNet se sert de la connexion Ethernet.", 0x757575);
         } else if (kind == 1) {
             text(&FONT_UI, x + 20, y + 14, "Bluetooth", COL_DARKTXT);
             rr_fill(x + 20, y + 44, 180, 36, 18, bt_on ? 0x2E7D32 : 0x9E9E9E);

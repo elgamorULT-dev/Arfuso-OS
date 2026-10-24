@@ -130,6 +130,11 @@ static void draw_avatar(int cx, int cy, int r) {
 
 void draw_desktop_base(const ArfDate *d) {
     zones_clear();
+    /* v1.5 - thème : 0 = Sombre (défaut), 1 = Clair */
+    u32 BAR_C  = g_theme ? 0xECECEC : 0x1B1B22;
+    u32 BTXT_C = g_theme ? COL_BLACK : 0xF2F2F2;
+    if (!g_theme) { bg_colors[0] = 0x181820; bg_colors[1] = 0x1A2430; bg_colors[2] = 0x202028; bg_colors[3] = 0x262018; }
+    else          { bg_colors[0] = 0xFFFFFF; bg_colors[1] = 0xE8F4FD; bg_colors[2] = 0xF2F2F2; bg_colors[3] = 0xFAF3E3; }
     /* fond : image ou couleur */
     if (bg_mode == 4 && wallpaper_active)
         wallpaper_blit();
@@ -137,27 +142,27 @@ void draw_desktop_base(const ArfDate *d) {
         rect_fill(0, 0, FB_W, FB_H, bg_mode == 4 ? bg_colors[0] : bg_colors[bg_mode]);
     DESK_BG = 0;
     /* barre du haut */
-    rect_fill(0, 0, FB_W, 52, COL_BAR);
-    rect_fill(0, 52, FB_W, 2, COL_BLACK);
+    rect_fill(0, 0, FB_W, 52, BAR_C);
+    rect_fill(0, 52, FB_W, 2, BTXT_C);
     /* icônes cliquables : réseau, bluetooth, batterie (mobile), engrenage */
-    wifi_arcs(34, 36, 18, COL_BLACK);
+    wifi_arcs(34, 36, 18, BTXT_C);
     zone_add(10, 6, 52, 40, Z_TOP_NET);
-    icon_bt(84, 26, 11, COL_BLACK);
+    icon_bt(84, 26, 11, BTXT_C);
     zone_add(66, 6, 40, 40, Z_TOP_BT);
     int nextx = 110;
     if (g_platform == 1) {                    /* batterie : seulement sur portables */
-        icon_battery(120, 14, 38, 24, COL_BLACK, COL_BAR);
+        icon_battery(120, 14, 38, 24, BTXT_C, BAR_C);
         zone_add(110, 6, 58, 40, Z_TOP_BAT);
         nextx = 172;
     }
-    icon_gear(nextx + 14, 26, 12, COL_BLACK);
+    icon_gear(nextx + 14, 26, 12, BTXT_C);
     zone_add(nextx - 2, 6, 40, 40, APP_PARAMS);
 
     char dn[16], ts[8];
     rtc_date_num(d, dn);
-    text_center(&FONT_UI, FB_W / 2 - 110, 14, dn, COL_DARKTXT);
+    text_center(&FONT_UI, FB_W / 2 - 110, 14, dn, BTXT_C);
     rtc_time_str(d, ts);
-    text_center(&FONT_UI, FB_W / 2 + 110, 14, ts, COL_DARKTXT);
+    text_center(&FONT_UI, FB_W / 2 + 110, 14, ts, BTXT_C);
     draw_logo(FB_W - 46, 6, 40);
     zone_add(FB_W - 52, 0, 52, 52, APP_LAUNCHER);      /* logo -> lanceur */
 
@@ -181,6 +186,7 @@ void draw_desktop_base(const ArfDate *d) {
         zone_add(FB_W - 90, yy, 84, 88, Z_TASK + i);
         yy += 96;
     }
+    notif_draw();   /* v1.5 : bandeaux de notification */
 }
 
 /* charge Système/BOOT.BMP (PJ11) dans le cache image ; 1 si ok */
@@ -228,14 +234,48 @@ static State screen_boot(void) {
 #if 0
 #endif
 
-/* ============ VERROUILLAGE ============ */
+/* ============ VERROUILLAGE v1.4 : fond personnalisable, heure gigantesque ============ */
+
+/* palettes (couleur unie / texte / icônes) — la 1re correspond à la maquette */
+static const u32 LOCK_BG[6]  = { 0xF00000, 0x101015, 0x0A1428, 0x4A148C, 0x37474F, 0xF5F5F5 };
+static const u32 LOCK_TX[6]  = { 0xFFFFFF, 0xFFFFFF, 0xFFFFFF, 0xFFFFFF, 0xFFFFFF, 0x141414 };
+static const u32 LOCK_IC[6]  = { 0x1A1A1A, 0xFFFFFF, 0xFFFFFF, 0xFFFFFF, 0xFFFFFF, 0x1A1A1A };
 
 static State screen_lock(void) {
     CURSOR_ON = 1;
-    if (!load_boot_img()) rect_fill(0, 0, FB_W, FB_H, COL_RED);
-    else wallpaper_blit();
-    fb_flush();
+    int last_sec = -1;
     for (;;) {
+        ArfDate d;
+        rtc_read(&d);
+        if (d.sec != last_sec) {
+            last_sec = d.sec;
+            zones_clear();
+            u32 txt, icn, bgc = 0x202020;
+            if (lock_bg_mode == 1 && load_boot_img()) {
+                wallpaper_blit();           /* image du disque choisie */
+                txt = 0xFFFFFF; icn = 0xFFFFFF;
+            } else {
+                int i = lock_bg_col % 6;
+                bgc = LOCK_BG[i]; txt = LOCK_TX[i]; icn = LOCK_IC[i];
+                rect_fill(0, 0, FB_W, FB_H, bgc);
+            }
+            /* icônes en haut à droite : batterie puis wifi */
+            icon_battery(FB_W - 118, 14, 42, 26, icn, bgc);
+            wifi_arcs(FB_W - 32, 30, 16, icn);
+            /* heure gigantesque en bas à droite : "12h32" */
+            char hh[8];
+            hh[0] = (char)('0' + d.hour / 10); hh[1] = (char)('0' + d.hour % 10);
+            hh[2] = 'h';
+            hh[3] = (char)('0' + d.min  / 10); hh[4] = (char)('0' + d.min  % 10);
+            hh[5] = 0;
+            int hy = FB_H - (FONT_CLK.height + 90);
+            text_right(&FONT_CLK, FB_W - 60, hy, hh, txt);
+            /* date complète juste en dessous : lundi 1er janvier 2027 */
+            char dl[48];
+            rtc_date_long(&d, dl);
+            text_right(&FONT_UI, FB_W - 60, FB_H - 60, dl, txt);
+            fb_flush();
+        }
         if (mouse_event() & 2) {
             pw_len = 0; pw[0] = 0; login_error = 0;
             return ST_LOGIN;
@@ -355,10 +395,18 @@ validate:
                 if (USERS[u].name[i] != login_id[i]) { same = 0; break; }
             if (!same) continue;
             int pwok = 1;
+            char hh[17]; pwd_hash(pw, hh);           /* v1.5 : mdp haché */
             if (!g_login_pwd)          /* connexion sans mot de passe (réglage) */
-                for (int i = 0; USERS[u].pwd[i] || pw[i]; i++)
-                    if (USERS[u].pwd[i] != pw[i]) { pwok = 0; break; }
-            if (pwok) { ok = 1; uidx = u; break; }
+                for (int i = 0; USERS[u].pwd[i] || hh[i]; i++)
+                    if (USERS[u].pwd[i] != hh[i]) { pwok = 0; break; }
+            /* v1.5 - PIN rapide : 4 chiffres ouvrent aussi la session */
+            int pinok = 0;
+            if (g_pin_en && pw_len == 4) {
+                pinok = 1;
+                for (int i = 0; i < 4; i++)
+                    if (pw[i] != (char)('0' + g_pin[i])) { pinok = 0; break; }
+            }
+            if (pwok || pinok) { ok = 1; uidx = u; break; }
         }
         if (ok && uidx >= 0) {
             CUR_USER_IDX = uidx;
@@ -507,15 +555,17 @@ static State screen_welcome(void) {
 
 /* métadonnées affichées pour les applis natives */
 typedef struct { const char *name; const char *glyph; u32 color; } BApp;
-static const BApp BUILTIN[8] = {
+static const BApp BUILTIN[10] = {
     {"?", "?", 0x555555},
-    {"Chrome", "Ch", 0x4285F4},
+    {"ArfuNet", "An", 0x0B57D0},
     {"Terminal", "Te", 0x212121},
     {"Notes", "No", 0xF9A825},
     {"Réglages", "Pa", 0x607D8B},
     {"Snake", "Sn", 0x1B8A3B},
     {"Explorer", "Ex", 0x00897B},
     {"Store", "St", 0x7B1FA2},
+    {"ArfuDocs", "Ad", 0x1565C0},
+    {"ArfuCalc", "Ca", 0xD81B60},
 };
 
 /* résout id/node -> métadonnées tâche */
@@ -568,6 +618,8 @@ static int run_app2(int id, int node) {
                 break;
             case APP_EXPLORER: r = app_explorer(); break;
             case APP_STORE:    r = app_store();    break;
+            case APP_DOCS:     r = app_docs();     break;
+            case APP_CALC:     r = app_calc();     break;
             case APP_SCRIPT:   r = app_script_viewer((u32)cur_node); break;
             case APP_OFF:      task_remove(cur_id, cur_node); return APP_OFF;
             case APP_LOCK:     task_remove(cur_id, cur_node); return APP_LOCK;
@@ -597,6 +649,16 @@ static int run_app(int id) { return run_app2(id, -1); }
 static State screen_desktop(void) {
     CURSOR_ON = 1;
     int dirty = 1, last_sec = -1, idle_sec = 0;
+    /* v1.5 : applis choisies lancées automatiquement à la connexion */
+    static int startup_done = 0;
+    if (!startup_done) { notif_push("Bienvenue sur Arfuso 1.5 !"); }
+    if (!startup_done && g_startmask) {
+        startup_done = 1;
+        for (int i = 1; i <= 9; i++)
+            if (g_startmask & (1 << i)) run_app2(i, -1);
+        dirty = 1;
+    }
+    startup_done = 1;
     for (;;) {
         ArfDate d;
         rtc_read(&d);
@@ -668,14 +730,14 @@ static State screen_desktop(void) {
         }
 
         if (app == APP_LAUNCHER) {
-            app = launcher_pick();
+            app = launcher_full();
             dirty = 1;
             if (!app) continue;
         }
         if (app >= 10000) {              /* .arf lancé depuis le lanceur */
             int node = app - 10000;
             int eng = arf_engine_of((u32)node);
-            if (eng >= 1 && eng <= 7) {
+            if (eng >= 1 && eng <= 9) {
                 int r = run_app2(eng, -1);
                 dirty = 1;
                 if (r == APP_LOCK) return ST_LOCK;
@@ -740,7 +802,7 @@ static void screen_not_installed(void) {
 
 void kmain(void) {
     serial_init();
-    serial_str("\n=== Arfuso Kernel 1.3.1 (noyau maison) ===\n");
+    serial_str("\n=== Arfuso Kernel 1.5.0 (noyau maison) ===\n");
     fb_init();
     serial_str("Framebuffer initialisé.\n");
     disk_ok = ata_find_disk(&the_disk);

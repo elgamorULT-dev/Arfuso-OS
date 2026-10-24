@@ -15,7 +15,9 @@ enum {
     APP_SNAKE = 5,
     APP_EXPLORER = 6,  /* Explorateur de fichiers          */
     APP_STORE = 7,     /* Arfu Store                       */
-    APP_LAUNCHER = 90, /* logo -> menu                     */
+    APP_DOCS = 8,      /* ArfuDocs (traitement de texte)   */
+    APP_CALC = 9,      /* ArfuCalc (calculatrice)          */
+    APP_LAUNCHER = 90, /* logo -> lanceur plein ecran      */
     APP_OFF = 91,
     APP_LOCK = 92,
     APP_SCRIPT = 93    /* visionneuse d'app .arf script    */
@@ -74,6 +76,14 @@ int  task_find(int id, int node);
 int app_browser(void);
 int app_terminal(void);
 int app_notes(void);
+int app_docs(void);
+int launcher_full(void);
+int app_calc(void);
+void notif_push(const char *msg);
+void notif_draw(void);
+void pwd_hash(const char *s, char out[17]);
+extern int lock_bg_mode;  /* 0 = couleur unie, 1 = image du disque  */
+extern int lock_bg_col;   /* index de la couleur unie du verrouillage */
 int app_params(void);
 int app_snake(void);
 int app_explorer(void);
@@ -121,5 +131,8 @@ void s_ndec(u32 v, char *out);
 /* Réglages système (Paramètres v1.3.1), chargés au boot depuis le secteur config */
 extern u32 g_accent;
 extern int g_theme, g_pwrmode, g_veille, g_scale100, g_fontbig;
+extern int g_startmask;  /* bits APP_* lancés automatiquement au login */
+extern int g_pin_en;      /* v1.5 : connexion rapide par PIN */
+extern int g_pin[4];      /* chiffres 0..9 du PIN */
 extern int g_telemetry, g_login_pwd, g_hicontrast, g_airplane;
 void settings_load(AtaDisk *d);

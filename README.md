@@ -1,4 +1,4 @@
-# Arfuso OS — v1.3.1
+# Arfuso OS — v1.5.0
 
 Système d'exploitation indépendant écrit **100 % from scratch** (aucune base
 Linux, Windows ou autre) : chargeur de démarrage (bootloader), noyau 64 bits,
@@ -9,7 +9,7 @@ maison, en assembleur (NASM) et en C.
 
 | Fichier | Cible |
 |---|---|
-| `arfuso-1.3.1-x86_64.iso` | PC x86_64 (BIOS), ISO amorçable = assistant d'installation (**dernière version**) |
+| `arfuso-1.5.0-x86_64.iso` | PC x86_64 (BIOS), ISO amorçable = assistant d'installation (**dernière version**) |
 | `arfuso-1.0.0 / 1.1.0 / 1.2.0 …` | versions précédentes conservées |
 | `arfuso-1.x.0-arm64-kernel8.img` | ARM64 (noyau de démarrage minimal, sortie série) |
 
@@ -17,6 +17,44 @@ L'ISO installe Arfuso OS sur le disque dur. Au premier démarrage, un petit
 assistant crée votre profil (identifiant + mot de passe optionnel), puis
 l'appareil redémarre tout seul : écran de démarrage image, écran de
 verrouillage image, écran de connexion, bureau.
+
+## Nouveautés v1.5
+
+- **Thème clair / sombre RÉEL** : le choix (Personnalisation) s'applique
+  désormais à TOUT le système — barre du haut, fond du bureau, dock —
+  instantanément et de façon persistante. Sombre = défaut.
+- **Notifications système** : bandeaux en haut à droite + bip matériel sur le
+  haut-parleur PC (canal 2, 880 Hz). Centre de l'utilisateur toujours net.
+- **ArfuCalc** : nouvelle calculatrice (souris et clavier), intégrée au
+  lanceur et au terminal (`ouvrir calc`).
+- **Applications au démarrage** : Paramètres > Applications -> interrupteurs ;
+  les applis cochées se lancent seules à chaque connexion (persistant).
+- **PIN rapide** : code à 4 chiffres dans Paramètres > Comptes ; ouvre la
+  session à la place du mot de passe.
+- **Sécurité** : les mots de passe ne sont plus stockés en clair — hachage
+  maison + migration silencieuse des anciens comptes.
+- **Clavier AZERTY / QWERTY** : bascule à tout moment dans Accessibilité
+  (le choix se faisait uniquement à l'installation avant).
+- **Polissage UI** : le texte des boutons est auto-ajusté partout (réduction
+  puis troncation « .. ») — plus aucun dépassement, installateur inclus.
+- Terminal : liste des applis mise à jour, `ver` -> « Arfuso OS 1.5.0 ».
+
+## Nouveautés v1.4
+
+- **Lanceur plein écran** : un clic sur le logo Arfuso ouvre toutes les
+  applications en plein écran, par-dessus tout (style Launchpad) ; clic dans
+  le vide ou Échap pour fermer.
+- **Écran de verrouillage v1.4** : heure gigantesque (« 12h48 »), date
+  complète, icônes batterie + Wi-Fi, **fond personnalisable** (Paramètres >
+  Personnalisation : couleur unie au choix — rouge vif, sombre, bleu nuit,
+  violet, gris, blanc — ou image du disque ; réglage persistant).
+- **ArfuDocs** : traitement de texte maison — titres, gras, interligne,
+  compteur mots/caractères, enregistrement et ouverture dans Documents.
+- **ArfuNet** : le navigateur (ex-« Chrome ») est renommé.
+- **Terminal enrichi** : `ls`, `cat`, `rm`, `ecrire`, `apps`, `ouvrir`
+  (chaîne vers les applis), `mem`, `df`, `about`, `avion on|off`,
+  `accent N`, `veille MIN`.
+- Associations : `.txt` -> ArfuDocs, `http://` -> ArfuNet.
 
 ## Nouveautés v1.3.1 — Paramètres complets
 

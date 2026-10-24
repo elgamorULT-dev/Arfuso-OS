@@ -115,7 +115,14 @@ static void win_frame(void) {
 static void ui_button(int x, int y, int w, const char *label, u32 bg, int id) {
     rr_fill(x - 2, y - 2, w + 4, 34, 4, WIN_EDGE);
     rr_fill(x, y, w, 30, 3, bg);
-    text_center(&FONT_UI, x + w / 2, y + 8, label, COL_WHITE);
+    /* v1.5 : le texte reste dans le bouton quoi qu'il arrive */
+    const ArfFont *f = &FONT_UI;
+    char buf[40]; s_copy(buf, label, 40);
+    if ((int)text_w(f, buf) > w - 12) f = &FONT_SM;
+    while (s_len(buf) > 3 && (int)text_w(f, buf) > w - 12) {
+        int l = s_len(buf); buf[l - 2] = '.'; buf[l - 1] = 0;
+    }
+    text_center(f, x + w / 2, y + (f == &FONT_UI ? 8 : 10), buf, COL_WHITE);
     zone_add(x, y, w, 30, id);
 }
 

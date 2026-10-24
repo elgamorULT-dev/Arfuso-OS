@@ -21,6 +21,27 @@ for op in OPS:
     cmd, _, arg = op.partition(':')
     if cmd == 'wait':
         time.sleep(float(arg))
+    elif cmd == 'text':
+        # AZERTY : pour que le noyau produise 'c', convertir la lettre en touche QWERTY a envoyer
+        AZ = {'a':'q','q':'a','z':'w','w':'z','m':'semicolon',',':'m',';':'comma',':':'shift-semicolon'}
+        for ch in arg:
+            if ch == ' ':
+                k = 'spc'
+            elif ch == '.':
+                k = 'dot'
+            elif ch.isdigit():
+                k = 'shift-' + ch          # en AZERTY les chiffres sont majuscules
+            elif ch.isalpha():
+                k = AZ.get(ch.lower(), ch.lower())
+                if ch.isupper():
+                    k = 'shift-' + k
+            else:
+                k = AZ.get(ch, None)
+                if not k: continue
+            f.write(json.dumps({"execute": "human-monitor-command",
+                                "arguments": {"command-line": f"sendkey {k}"}}).encode() + b'\n')
+            recv_json()
+            time.sleep(0.12)
     elif cmd == 'key':
         f.write(json.dumps({"execute": "human-monitor-command",
                             "arguments": {"command-line": f"sendkey {arg}"}}).encode() + b'\n')
